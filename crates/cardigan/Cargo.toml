@@ -1,0 +1,41 @@
+[package]
+name = "cardigan"
+description = "A Apple<->Fastmail Contacts Sync"
+default-run = "cardigan"
+autotests = false
+
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[lib]
+name = "cardigan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cardigan"
+path = "src/bin/cardigan.rs"
+
+[dependencies]
+cg-core.workspace = true
+
+anyhow.workspace = true
+mimalloc.workspace = true
+clap.workspace = true
+config.workspace = true
+log.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-graceful-shutdown.workspace = true
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

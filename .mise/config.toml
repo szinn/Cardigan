@@ -1,0 +1,61 @@
+[env]
+
+[tools]
+"cargo:cargo-audit" = "0.22.2"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-insta" = "1.48.0"
+"cargo:cargo-nextest" = "0.9.145"
+"git-cliff" = "2.14.2"
+"prettier" = "3.9.8"
+
+[tasks.fmt-code]
+description = "Format code"
+run = "cargo +nightly fmt --all"
+
+[tasks.fmt-docs]
+description = "Format documentation"
+run = "prettier --config .config/prettierrc --ignore-path .gitignore --ignore-path .config/prettierignore --log-level warn -w ."
+
+[tasks.fmt]
+description = "Format code and documentation"
+depends = ["fmt-code", "fmt-docs"]
+
+[tasks.lint-rust]
+description = "Lint code"
+run = "cargo +nightly clippy --workspace --all-targets --all-features --target-dir target/clippy"
+
+[tasks.lint]
+description = "Lint project"
+depends = ["lint-rust"]
+
+[tasks.fmt-lint]
+description = "Lint and format project"
+depends = ["fmt", "lint"]
+
+[tasks.component-tests]
+description = "Run component tests"
+run = "cargo nextest run --workspace --all-features --exclude integration-tests"
+
+[tasks.doc-tests]
+description = "Run document tests"
+run = "cargo test --doc"
+
+[tasks.insta-test]
+description = "Run insta tests"
+run = "cargo insta test --test-runner nextest --all-features"
+
+[tasks.insta-review]
+description = "Review insta snapshots"
+run = "cargo insta review"
+
+[tasks.test]
+description = "Run all tests"
+depends = ["insta-test"]
+
+[tasks.build]
+description = "Build all crates"
+run = "cargo build"
+
+[tasks.clean]
+description = "Clean all build results"
+run = "cargo clean"

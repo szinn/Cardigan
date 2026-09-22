@@ -1,0 +1,5 @@
+{
+  "project_slug": "cg",
+  "server": "https://issueboss.zinn.ca:8090",
+  "insights_dir": ".insights/"
+}
