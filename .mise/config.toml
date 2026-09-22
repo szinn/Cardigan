@@ -4,7 +4,7 @@
 "cargo:cargo-audit" = "0.22.2"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-insta" = "1.48.0"
-"cargo:cargo-nextest" = "0.9.145"
+"cargo:cargo-nextest" = "0.9.146"
 "git-cliff" = "2.14.2"
 "prettier" = "3.9.8"
 
@@ -59,3 +59,7 @@ run = "cargo build"
 [tasks.clean]
 description = "Clean all build results"
 run = "cargo clean"
+
+[tasks.run]
+description = "Run in server mode"
+run = "cargo run -- server"
