@@ -20,6 +20,7 @@ path = "src/bin/cardigan.rs"
 
 [dependencies]
 cg-core.workspace = true
+cg-database.workspace = true
 
 anyhow.workspace = true
 mimalloc.workspace = true

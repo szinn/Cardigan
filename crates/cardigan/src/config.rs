@@ -1,9 +1,13 @@
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 use crate::error::Error;
 
 #[derive(Debug, Deserialize)]
-pub struct Config {}
+pub struct Config {
+    pub database_path: PathBuf,
+}
 
 impl Config {
     pub fn load() -> Result<Self, Error> {

@@ -1,8 +1,10 @@
+use anyhow::Context;
 use cardigan::{
     commands::{CommandLine, Commands},
     config::Config,
     logging::init_logging,
 };
+use cg_core::{ExternalServicesBuilder, create_services};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -22,9 +24,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn cmd_server(_config: cardigan::config::Config) -> anyhow::Result<()> {
+async fn cmd_server(config: cardigan::config::Config) -> anyhow::Result<()> {
     // use std::{sync::Arc, time::Duration};
     //
+    use cg_database::{create_repository_service, open_database};
     // use anyhow::Context;
     // use bb_api::create_api_subsystem;
     // use bb_core::{ExternalServicesBuilder, create_core_subsystem,
@@ -40,23 +43,22 @@ async fn cmd_server(_config: cardigan::config::Config) -> anyhow::Result<()> {
 
     let span = tracing::span!(tracing::Level::TRACE, "Cardigan Startup").entered();
 
-    // let database = open_database(&config.database).await.context("Couldn't
-    // create database connection")?; let repository_service =
-    // create_repository_service(database).await.context("Couldn't create
-    // database connection")?; let file_store =
+    let database_path = format!("sqlite:///{}/cardigan.db?mode=rwc", config.database_path.to_string_lossy());
+    let database = open_database(&database_path).await.context("Couldn't create database connection")?;
+    let repository_service = create_repository_service(database).await.context("Couldn't create database connection")?;
+
+    let external = ExternalServicesBuilder::default()
+        .repository_service(repository_service.clone())
+        .build()
+        .context("ExternalServices missing required field")?;
+    let _core_services = create_services(external).context("Couldn't create core services")?;
+
+    // let file_store =
     // Arc::new(bb_storage::LocalFileStore::new(config.library.library_path.
     // clone())); let format_service: Arc<dyn FormatService> =
     // Arc::new(create_format_service()); let worker_poll_interval =
     // Duration::from_secs(config.import.worker_poll_interval_secs);
     //
-    // let external = ExternalServicesBuilder::default()
-    //     .repository_service(repository_service.clone())
-    //     .file_store(file_store)
-    //     .format_service(format_service)
-    //     .bookdrop_path(config.import.bookdrop_path.clone())
-    //     .scan_interval(Duration::from_secs(config.import.scan_interval_secs))
-    //     .build()
-    //     .context("ExternalServices missing required field")?;
     // let core_services = create_services(external,
     // &config.encryption_secret).context("Couldn't create core services")?;
 
@@ -87,7 +89,6 @@ async fn cmd_server(_config: cardigan::config::Config) -> anyhow::Result<()> {
     // .handle_shutdown_requests(Duration::from_secs(3))
     // .await?;
 
-    // repository_service.repository().close().await.context("Couldn't close
-    // database")?;
+    repository_service.repository().close().await.context("Couldn't close database")?;
     Ok(())
 }

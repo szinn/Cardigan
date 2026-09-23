@@ -8,3 +8,12 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
+
+[features]
+test-support = ["dep:mockall"]
+
+[dependencies]
+async-trait.workspace = true
+derive_builder.workspace = true
+mockall = { workspace = true, optional = true }
+thiserror.workspace = true
