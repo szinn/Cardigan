@@ -100,6 +100,19 @@ impl Config {
 
         Self::try_from(raw)
     }
+
+    /// SQLite URL for the state database inside `database_path`. The
+    /// directory must already exist; the file is created on first open.
+    pub fn database_url(&self) -> Result<String, Error> {
+        if !self.database_path.is_dir() {
+            return Err(Error::InvalidValue {
+                variable: "CARDIGAN_DATABASE_PATH",
+                reason: format!("{} is not an existing directory", self.database_path.display()),
+            });
+        }
+
+        Ok(format!("sqlite://{}?mode=rwc", self.database_path.join("cardigan.db").display()))
+    }
 }
 
 impl TryFrom<RawConfig> for Config {
@@ -294,5 +307,30 @@ mod tests {
     fn non_numeric_max_photo_bytes_is_rejected() {
         let err = load(&with(&[("CARDIGAN_MAX_PHOTO_BYTES", "1MiB")])).unwrap_err();
         assert_eq!(err.to_string(), "invalid value for CARDIGAN_MAX_PHOTO_BYTES: invalid digit found in string");
+    }
+
+    fn load_with_database_path(path: &str) -> Config {
+        let mut vars: Vec<(&str, &str)> = REQUIRED.iter().filter(|(k, _)| *k != "CARDIGAN_DATABASE_PATH").copied().collect();
+        vars.push(("CARDIGAN_DATABASE_PATH", path));
+        load(&vars).unwrap()
+    }
+
+    #[test]
+    fn database_url_points_at_cardigan_db_in_directory() {
+        let dir = std::env::temp_dir();
+        let config = load_with_database_path(dir.to_str().unwrap());
+        assert_eq!(
+            config.database_url().unwrap(),
+            format!("sqlite://{}?mode=rwc", dir.join("cardigan.db").display())
+        );
+    }
+
+    #[test]
+    fn database_url_rejects_missing_directory() {
+        let config = load_with_database_path("/definitely/not/a/cardigan/dir");
+        assert_eq!(
+            config.database_url().unwrap_err().to_string(),
+            "invalid value for CARDIGAN_DATABASE_PATH: /definitely/not/a/cardigan/dir is not an existing directory"
+        );
     }
 }

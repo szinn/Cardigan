@@ -61,5 +61,9 @@ description = "Clean all build results"
 run = "cargo clean"
 
 [tasks.run]
-description = "Run in server mode"
-run = "cargo run -- server"
+description = "Run in sync mode"
+run = "cargo run -- sync"
+
+[tasks.dry-run]
+description = "Print the sync plan without writing"
+run = "cargo run -- dry-run"
