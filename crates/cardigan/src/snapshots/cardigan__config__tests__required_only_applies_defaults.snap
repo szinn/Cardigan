@@ -1,0 +1,20 @@
+---
+source: crates/cardigan/src/config.rs
+expression: config
+---
+Config {
+    icloud: EndpointConfig {
+        url: "https://contacts.icloud.com",
+        username: "jane@icloud.com",
+        password: Secret([REDACTED]),
+    },
+    fastmail: EndpointConfig {
+        url: "https://carddav.fastmail.com",
+        username: "jane@fastmail.com",
+        password: Secret([REDACTED]),
+    },
+    poll_interval: 120s,
+    database_path: "/var/lib/cardigan",
+    conflict_winner: ICloud,
+    max_photo_bytes: 1048576,
+}

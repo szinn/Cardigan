@@ -142,9 +142,8 @@ where
 pub(crate) mod testing {
     use std::{any::Any, sync::Arc};
 
-    use crate::Error;
-
     use super::{MockRepository, RepositoryServiceBuilder, Transaction};
+    use crate::Error;
 
     /// A no-op transaction for unit tests.
     pub(crate) struct MockTransaction;

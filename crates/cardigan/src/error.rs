@@ -7,4 +7,10 @@ pub enum Error {
 
     #[error(transparent)]
     ConfigError(#[from] ConfigError),
+
+    #[error("missing required environment variable(s): {}", .0.join(", "))]
+    MissingVariables(Vec<&'static str>),
+
+    #[error("invalid value for {variable}: {reason}")]
+    InvalidValue { variable: &'static str, reason: String },
 }
