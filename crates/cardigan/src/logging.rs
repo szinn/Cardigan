@@ -1,31 +1,34 @@
 use anyhow::{Context, Result};
+use tracing_subscriber::EnvFilter;
+
+/// Dependency targets that are too noisy at Cardigan's default levels.
+const SILENCED_TARGETS: &[&str] = &[
+    "sqlx::query",
+    "sea_orm",
+    "warnings::warnings",
+    "hyper::proto",
+    "hyper::client",
+    "hyper_util::client",
+    "h2",
+    "rustls",
+    "tokio_util",
+    "reqwest",
+];
+
+fn build_env_filter(base: EnvFilter) -> Result<EnvFilter> {
+    SILENCED_TARGETS.iter().try_fold(base, |filter, target| {
+        Ok(filter.add_directive(format!("{target}=off").parse().with_context(|| format!("Invalid log directive for {target}"))?))
+    })
+}
 
 pub fn init_logging() -> Result<()> {
     use tracing::subscriber::set_global_default;
     use tracing_log::LogTracer;
-    use tracing_subscriber::{EnvFilter, Registry, fmt::format::FmtSpan, prelude::__tracing_subscriber_SubscriberExt};
+    use tracing_subscriber::{Registry, fmt::format::FmtSpan, prelude::__tracing_subscriber_SubscriberExt};
 
     LogTracer::init_with_filter(log::LevelFilter::Off).context("Unable to setup log tracer")?;
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"))
-        .add_directive("sqlx::postgres::notice=off".parse()?)
-        .add_directive("sqlx::query=off".parse()?)
-        .add_directive("sea_orm=off".parse()?)
-        .add_directive("warnings::warnings=off".parse()?)
-        .add_directive("hyper::proto=off".parse()?)
-        .add_directive("hyper::client=off".parse()?)
-        .add_directive("hyper_util::client=off".parse()?)
-        .add_directive("axum::serve=off".parse()?)
-        .add_directive("axum_session::handler=off".parse()?)
-        .add_directive("axum_session::service=off".parse()?)
-        .add_directive("axum_session_auth::service=off".parse()?)
-        .add_directive("h2=off".parse()?)
-        .add_directive("rustls=off".parse()?)
-        .add_directive("tokio_util=off".parse()?)
-        .add_directive("tower_http=off".parse()?)
-        .add_directive("reqwest=off".parse()?)
-        .add_directive("simple_crypt=off".parse()?);
+    let env_filter = build_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))?;
 
     let formatting_layer = tracing_subscriber::fmt::layer()
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
@@ -33,7 +36,32 @@ pub fn init_logging() -> Result<()> {
 
     let subscriber = Registry::default().with(env_filter).with(formatting_layer);
 
-    set_global_default(subscriber).context("Failed to set tracing subscriber xxx")?;
+    set_global_default(subscriber).context("Failed to set tracing subscriber")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_filter_silences_only_cardigan_dependencies() {
+        let filter = build_env_filter(EnvFilter::new("info")).unwrap().to_string();
+        for target in [
+            "hyper::proto",
+            "hyper_util::client",
+            "reqwest",
+            "rustls",
+            "h2",
+            "tokio_util",
+            "sea_orm",
+            "sqlx::query",
+        ] {
+            assert!(filter.contains(&format!("{target}=off")), "{target} should be silenced in {filter}");
+        }
+        for leftover in ["axum", "tower_http", "simple_crypt", "sqlx::postgres"] {
+            assert!(!filter.contains(leftover), "{leftover} is a BookBoss leftover in {filter}");
+        }
+    }
 }
