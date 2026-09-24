@@ -44,8 +44,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    repository_service.repository().close().await.context("Couldn't close database")?;
-    result
+    match repository_service.repository().close().await.context("Couldn't close database") {
+        Ok(()) => result,
+        Err(close_err) => match result {
+            Err(result_err) => {
+                tracing::error!(error = %format_args!("{close_err:#}"), "Couldn't close database");
+                Err(result_err)
+            }
+            Ok(()) => Err(close_err),
+        },
+    }
 }
 
 async fn open_repository(config: &Config) -> anyhow::Result<Arc<RepositoryService>> {

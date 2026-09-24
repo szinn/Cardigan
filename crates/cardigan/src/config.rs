@@ -104,6 +104,14 @@ impl Config {
     /// SQLite URL for the state database inside `database_path`. The
     /// directory must already exist; the file is created on first open.
     pub fn database_url(&self) -> Result<String, Error> {
+        let path = self.database_path.display().to_string();
+        if path.contains('?') || path.contains('%') {
+            return Err(Error::InvalidValue {
+                variable: "CARDIGAN_DATABASE_PATH",
+                reason: format!("{path} contains '?' or '%', which the SQLite URL cannot represent"),
+            });
+        }
+
         if !self.database_path.is_dir() {
             return Err(Error::InvalidValue {
                 variable: "CARDIGAN_DATABASE_PATH",
@@ -332,5 +340,29 @@ mod tests {
             config.database_url().unwrap_err().to_string(),
             "invalid value for CARDIGAN_DATABASE_PATH: /definitely/not/a/cardigan/dir is not an existing directory"
         );
+    }
+
+    #[test]
+    fn database_url_rejects_path_containing_question_mark() {
+        let path = "/var/lib/cardigan?evil=1";
+        let config = load_with_database_path(path);
+        assert_eq!(
+            config.database_url().unwrap_err().to_string(),
+            "invalid value for CARDIGAN_DATABASE_PATH: /var/lib/cardigan?evil=1 contains '?' or '%', which the SQLite URL cannot represent"
+        );
+    }
+
+    #[test]
+    fn database_url_rejects_regular_file() {
+        let path = std::env::temp_dir().join(format!("cardigan-test-file-{}", std::process::id()));
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let config = load_with_database_path(path.to_str().unwrap());
+        assert_eq!(
+            config.database_url().unwrap_err().to_string(),
+            format!("invalid value for CARDIGAN_DATABASE_PATH: {} is not an existing directory", path.display())
+        );
+
+        std::fs::remove_file(&path).unwrap();
     }
 }

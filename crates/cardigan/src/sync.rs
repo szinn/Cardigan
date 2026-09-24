@@ -65,7 +65,7 @@ pub async fn run_loop(runner: Arc<dyn CycleRunner>, poll_interval: Duration, res
 
         match runner.run_cycle(CycleRequest { mode: CycleMode::Sync, reset }).await {
             Ok(()) => reset = false,
-            Err(e) => tracing::error!(error = %e, "Sync cycle failed; retrying next interval"),
+            Err(e) => tracing::error!(error = %format_args!("{e:#}"), "Sync cycle failed; retrying next interval"),
         }
     }
 
@@ -210,6 +210,32 @@ mod tests {
         let cycles = run_for(&runner, POLL, false, Duration::from_secs(400)).await;
         let starts: Vec<u64> = cycles.iter().map(|(t, _)| *t).collect();
         assert_eq!(starts, vec![0, 150, 300]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sync_subsystem_runs_under_toplevel_until_shutdown_requested() {
+        let runner = Arc::new(RecordingRunner::default());
+        let subsystem = SyncSubsystem::new(runner.clone(), POLL, false);
+
+        Toplevel::new(async move |s: &mut SubsystemHandle| {
+            s.start(SubsystemBuilder::new("Sync", subsystem.into_subsystem()));
+            s.start(SubsystemBuilder::new(
+                "ShutdownTrigger",
+                async move |sub: &mut SubsystemHandle| -> anyhow::Result<()> {
+                    // Let the sync loop run its first (immediate) cycle and one
+                    // more after a full poll interval, then stop the tree.
+                    tokio::time::sleep(POLL + Duration::from_secs(1)).await;
+                    sub.request_shutdown();
+                    Ok(())
+                },
+            ));
+        })
+        .handle_shutdown_requests(SHUTDOWN_TIMEOUT)
+        .await
+        .expect("toplevel should shut down cleanly");
+
+        let cycles: Vec<CycleRequest> = runner.requests.lock().unwrap().iter().map(|(_, r)| *r).collect();
+        assert_eq!(cycles, vec![sync(false), sync(false)], "expected the immediate cycle plus one more tick");
     }
 
     #[tokio::test]
