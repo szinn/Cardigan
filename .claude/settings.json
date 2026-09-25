@@ -36,6 +36,8 @@
       "Bash(~/.claude/plugins/cache/superpowers-extended-cc-marketplace/superpowers-extended-cc/5.2.1/skills/brainstorming/scripts/start-server.sh --project-dir /Users/scotte/Development/Projects/MailKeep)",
       "Bash(bash /Users/scotte/.claude/plugins/cache/superpowers-extended-cc-marketplace/superpowers-extended-cc/5.2.1/skills/brainstorming/scripts/start-server.sh --project-dir /Users/scotte/Development/Projects/MailKeep)",
       "Bash(bash skills/brainstorming/scripts/start-server.sh --project-dir /Users/scotte/Development/Projects/MailKeep)",
+      "Bash(mise run *)",
+      "Bash(cargo deny *)",
       "Edit(./**)",
       "Read(//Users/scotte/.claude/plugins/marketplaces/superpowers-extended-cc-marketplace/**)",
       "Skill(issueboss:issueboss)",
