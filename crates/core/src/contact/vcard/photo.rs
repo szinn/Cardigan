@@ -97,7 +97,10 @@ mod tests {
     fn stripped_card_hashes_equal_when_photo_excluded() {
         let original = card(&with_body("PHOTO;ENCODING=b;TYPE=JPEG:QUJD\r\n"));
         let stripped = original.strip_photo();
-        let exclude = HashOptions { exclude_photo: true };
+        let exclude = HashOptions {
+            exclude_photo: true,
+            ..HashOptions::default()
+        };
         assert_eq!(original.canonical_hash(exclude), stripped.canonical_hash(exclude));
         assert_ne!(original.canonical_hash(HashOptions::default()), stripped.canonical_hash(HashOptions::default()));
     }

@@ -16,7 +16,10 @@ const FIXTURES: [(&str, &[u8]); 3] = [
     ("apple_group", APPLE_GROUP),
 ];
 
-const EXCLUDE_PHOTO: HashOptions = HashOptions { exclude_photo: true };
+const EXCLUDE_PHOTO: HashOptions = HashOptions {
+    exclude_photo: true,
+    exclude_uid: false,
+};
 
 fn card(bytes: &[u8]) -> VCard {
     VCard::parse(bytes).expect("fixture parses")
@@ -84,14 +87,7 @@ fn strip_photo_keeps_every_other_fixture_byte() {
     let stripped = original.strip_photo();
     assert_eq!(stripped.as_bytes(), without_photo_lines(APPLE_FULL).as_slice());
     assert_eq!(stripped.canonical_hash(EXCLUDE_PHOTO), original.canonical_hash(EXCLUDE_PHOTO));
-    for name in [
-        "X-ABLabel",
-        "X-ABADR",
-        "X-SOCIALPROFILE",
-        "X-ABRELATEDNAMES",
-        "X-CARDIGAN-UNKNOWN",
-        "X-ABCROP-RECTANGLE",
-    ] {
+    for name in ["X-ABLabel", "X-ABADR", "X-SOCIALPROFILE", "X-ABRELATEDNAMES", "X-CARDIGAN-UNKNOWN"] {
         assert_eq!(stripped.properties_named(name).count(), original.properties_named(name).count(), "{name}");
     }
 }

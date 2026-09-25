@@ -2,6 +2,10 @@ use std::ops::Range;
 
 use super::{Param, Property, VCardError};
 
+/// A leading UTF-8 BOM, skipped for parsing only: `as_bytes` still returns
+/// it, and the first property's span still starts after it.
+const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
 /// Parses and structurally validates one card.
 pub(super) fn parse(raw: &[u8]) -> Result<Vec<Property>, VCardError> {
     let properties = unfold(raw).into_iter().map(parse_line).collect::<Result<Vec<_>, _>>()?;
@@ -20,7 +24,7 @@ struct LogicalLine {
 /// across the fold. Accepts CRLF and bare LF; skips blank lines.
 fn unfold(raw: &[u8]) -> Vec<LogicalLine> {
     let mut lines: Vec<LogicalLine> = Vec::new();
-    let mut start = 0;
+    let mut start = if raw.starts_with(BOM) { BOM.len() } else { 0 };
     let mut line = 0;
 
     while start < raw.len() {
@@ -64,6 +68,7 @@ fn parse_line(logical: LogicalLine) -> Result<Property, VCardError> {
         return Err(VCardError::MalformedLine { line });
     }
     let params = segments
+        .filter(|segment| !segment.is_empty())
         .map(|segment| parse_param(segment).ok_or(VCardError::MalformedLine { line }))
         .collect::<Result<Vec<_>, _>>()?;
 

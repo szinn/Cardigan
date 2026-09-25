@@ -20,7 +20,11 @@ const CASE_INSENSITIVE_PARAMS: [&str; 4] = ["TYPE", "ENCODING", "VALUE", "CHARSE
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HashOptions {
     /// Leave `PHOTO` out, for cards whose photo was stripped as oversize.
+    /// URI-valued photos are left out as well.
     pub exclude_photo: bool,
+    /// Leave `UID` out, for baseline pass 2 (content equality across
+    /// different UIDs).
+    pub exclude_uid: bool,
 }
 
 /// SHA-256 of a card's canonical form. Comparison only — never sent anywhere.
@@ -82,7 +86,8 @@ impl VCard {
     }
 
     /// The comparison-only text form. Rules (version `CANONICAL_VERSION`):
-    /// - drop `REV`, `PRODID` (and `PHOTO` when `exclude_photo`);
+    /// - drop `REV`, `PRODID` (and `PHOTO` when `exclude_photo`, `UID` when
+    ///   `exclude_uid`);
     /// - upper-case property and parameter names, merge repeated parameters;
     /// - `TYPE`/`ENCODING`/`VALUE`/`CHARSET` values upper-cased, sorted and
     ///   de-duplicated; `ENCODING=BASE64` is `ENCODING=B`;
@@ -125,7 +130,7 @@ impl VCard {
 }
 
 fn is_excluded(property: &Property, options: HashOptions) -> bool {
-    VOLATILE.iter().any(|name| property.is(name)) || (options.exclude_photo && property.is("PHOTO"))
+    VOLATILE.iter().any(|name| property.is(name)) || (options.exclude_photo && property.is("PHOTO")) || (options.exclude_uid && property.is("UID"))
 }
 
 /// `NAME;PARAM=v1,v2;...:value` without the group prefix.
@@ -151,11 +156,23 @@ fn canonical_line(property: &Property) -> String {
             values.sort();
             values.dedup();
         }
-        write!(line, ";{name}={}", values.join(",")).expect("write to String is infallible");
+        let quoted: Vec<String> = values.iter().map(|value| quote_if_needed(value)).collect();
+        write!(line, ";{name}={}", quoted.join(",")).expect("write to String is infallible");
     }
     line.push(':');
     line.push_str(&canonical_value(property.value()));
     line
+}
+
+/// Wraps a parameter value in double quotes when it contains a delimiter
+/// (`,`, `;`, or `:`) so a quoted single value stays distinguishable from an
+/// unquoted list. The parser already stripped the original quotes.
+fn quote_if_needed(value: &str) -> String {
+    if value.contains([',', ';', ':']) {
+        format!("\"{value}\"")
+    } else {
+        value.to_owned()
+    }
 }
 
 /// Normalises the one equivalent escape spelling: `\N` → `\n`.
@@ -196,7 +213,10 @@ mod tests {
     }
 
     fn hash_without_photo(text: &str) -> CardHash {
-        VCard::parse(text).expect("card parses").canonical_hash(HashOptions { exclude_photo: true })
+        VCard::parse(text).expect("card parses").canonical_hash(HashOptions {
+            exclude_photo: true,
+            ..HashOptions::default()
+        })
     }
 
     #[test]
@@ -327,6 +347,49 @@ mod tests {
         let without_photo = vcf(&["FN:Jane"]);
         assert_ne!(hash(&with_photo), hash(&without_photo));
         assert_eq!(hash_without_photo(&with_photo), hash_without_photo(&without_photo));
+    }
+
+    #[test]
+    fn exclude_uid_ignores_uid() {
+        let a = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nFN:Jane\r\nEND:VCARD\r\n";
+        let b = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u2\r\nFN:Jane\r\nEND:VCARD\r\n";
+        let exclude_uid = HashOptions {
+            exclude_uid: true,
+            ..HashOptions::default()
+        };
+        let hash_of = |text, options| VCard::parse(text).expect("card parses").canonical_hash(options);
+        assert_ne!(hash_of(a, HashOptions::default()), hash_of(b, HashOptions::default()));
+        assert_eq!(hash_of(a, exclude_uid), hash_of(b, exclude_uid));
+    }
+
+    #[test]
+    fn exclude_uid_still_detects_real_edits() {
+        let a = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nFN:Jane\r\nEND:VCARD\r\n";
+        let b = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u2\r\nFN:Janet\r\nEND:VCARD\r\n";
+        let exclude_uid = HashOptions {
+            exclude_uid: true,
+            ..HashOptions::default()
+        };
+        let hash_of = |text, options| VCard::parse(text).expect("card parses").canonical_hash(options);
+        assert_ne!(hash_of(a, exclude_uid), hash_of(b, exclude_uid));
+    }
+
+    #[test]
+    fn quoted_param_value_with_comma_differs_from_two_values() {
+        assert_ne!(hash(&vcf(&["X-TEST;X-P=\"a,b\":x"])), hash(&vcf(&["X-TEST;X-P=a,b:x"])));
+    }
+
+    #[test]
+    fn quoted_param_value_with_semicolon_differs_from_two_params() {
+        assert_ne!(hash(&vcf(&["X-TEST;X-P=\"a;Y=b\":x"])), hash(&vcf(&["X-TEST;X-P=a;Y=b:x"])));
+    }
+
+    #[test]
+    fn type_param_spelling_still_equal_after_quoting_fix() {
+        assert_eq!(
+            hash(&vcf(&["EMAIL;TYPE=HOME,INTERNET:jane@example.com"])),
+            hash(&vcf(&["EMAIL;type=internet;type=home:jane@example.com"]))
+        );
     }
 
     #[test]

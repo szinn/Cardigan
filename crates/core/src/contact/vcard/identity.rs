@@ -96,9 +96,11 @@ impl VCard {
     }
 
     fn display_name(&self) -> Option<String> {
-        self.properties_named("FN")
+        let name = self
+            .properties_named("FN")
             .find_map(|p| non_empty(collapse(&unescape(p.value()))))
-            .or_else(|| self.name_from_n())
+            .or_else(|| self.name_from_n())?;
+        (!looks_like_contact_point(&name)).then_some(name)
     }
 
     /// `N` is Family;Given;Middle;Prefix;Suffix — shown as
@@ -117,7 +119,22 @@ impl VCard {
 }
 
 fn collapse(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let without_control: String = s.chars().filter(|c| !c.is_control()).collect();
+    without_control.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// An email address or phone number, used as `FN` by contacts with no name.
+/// The PII policy forbids ever displaying either, so such an `FN` is treated
+/// as no name.
+fn looks_like_contact_point(s: &str) -> bool {
+    if s.contains('@') {
+        return true;
+    }
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let phone_chars_only = s
+        .chars()
+        .all(|c| c.is_ascii_digit() || c.is_whitespace() || matches!(c, '+' | '-' | '(' | ')' | '.'));
+    has_digit && phone_chars_only
 }
 
 fn non_empty(s: String) -> Option<String> {
@@ -171,6 +188,19 @@ mod tests {
     fn display_without_name() {
         assert_eq!(card(&[]).display_identity().to_string(), "<no name>");
         assert_eq!(card(&["ORG:Acme"]).display_identity().to_string(), "<no name> (Acme)");
+    }
+
+    #[test]
+    fn display_treats_email_or_phone_fn_as_no_name() {
+        assert_eq!(card(&["FN:jane@example.com"]).display_identity().to_string(), "<no name>");
+        assert_eq!(card(&["FN:+1 (555) 010-0100"]).display_identity().to_string(), "<no name>");
+        assert_eq!(card(&["FN:Agent 47"]).display_identity().to_string(), "Agent 47");
+    }
+
+    #[test]
+    fn display_strips_control_characters() {
+        let display = card(&["FN:Jane\u{1b}[31m Doe"]).display_identity().to_string();
+        assert!(!display.contains('\u{1b}'), "{display}");
     }
 
     #[test]

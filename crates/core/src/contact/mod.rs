@@ -1,5 +1,5 @@
 //! Contacts: identifiers shared by both sides and vCard handling. Pure — no
-//! I/O, no logging.
+//! I/O, no async, no tracing.
 
 mod model;
 mod vcard;

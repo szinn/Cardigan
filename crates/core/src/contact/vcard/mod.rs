@@ -276,6 +276,27 @@ mod tests {
     }
 
     #[test]
+    fn skips_leading_bom_for_parsing_but_keeps_it_in_raw_bytes() {
+        let text = "\u{FEFF}BEGIN:VCARD\nVERSION:3.0\nUID:u1\nEND:VCARD\n";
+        let card = card(text);
+        assert!(card.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert_eq!(card.uid().as_str(), "u1");
+        assert_eq!(card.properties()[0].span.start, 3);
+    }
+
+    #[test]
+    fn empty_parameter_segment_is_skipped() {
+        let with_type = card("BEGIN:VCARD\nVERSION:3.0\nUID:u1\nTEL;;TYPE=CELL:+1 555\nEND:VCARD\n");
+        let tel = with_type.properties_named("TEL").next().expect("TEL present");
+        assert_eq!(tel.params().len(), 1);
+        assert_eq!(tel.params()[0].values(), ["CELL"]);
+
+        let bare = card("BEGIN:VCARD\nVERSION:3.0\nUID:u1\nTEL;:x\nEND:VCARD\n");
+        let tel = bare.properties_named("TEL").next().expect("TEL present");
+        assert_eq!(tel.params(), []);
+    }
+
+    #[test]
     fn rejects_bad_structure() {
         assert_eq!(error(b""), VCardError::MissingBegin);
         assert_eq!(error(b"VERSION:3.0\nBEGIN:VCARD\nUID:u1\nEND:VCARD\n"), VCardError::MissingBegin);
