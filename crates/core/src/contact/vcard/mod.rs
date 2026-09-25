@@ -5,6 +5,7 @@
 
 mod canonical;
 mod parser;
+mod photo;
 
 use std::{fmt, ops::Range};
 
