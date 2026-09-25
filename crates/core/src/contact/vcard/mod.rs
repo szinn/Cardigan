@@ -3,9 +3,12 @@
 //! PII: nothing in this module may put property values into `Debug` output
 //! or error messages — only the UID, property names, counts and line numbers.
 
+mod canonical;
 mod parser;
 
 use std::{fmt, ops::Range};
+
+pub use canonical::{CANONICAL_VERSION, CardHash, HashOptions};
 
 use super::Uid;
 

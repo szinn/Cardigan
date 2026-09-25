@@ -60,6 +60,7 @@ tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
 alderkit-token = "0.1.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 derive_builder = "0.20.2"
+sha2 = "0.11.0"
 
 # Config
 config = "0.15.26"
