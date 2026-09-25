@@ -3,6 +3,8 @@ pub mod contact;
 pub mod error;
 pub mod repository;
 pub mod state;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 use std::sync::Arc;
 
