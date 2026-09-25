@@ -9,6 +9,9 @@ mod parser;
 mod photo;
 mod text;
 
+#[cfg(test)]
+mod fidelity_tests;
+
 use std::{fmt, ops::Range};
 
 pub use canonical::{CANONICAL_VERSION, CardHash, HashOptions};

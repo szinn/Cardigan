@@ -1,0 +1,10 @@
+---
+source: crates/core/src/contact/vcard/fidelity_tests.rs
+expression: table
+---
+apple_full: d4ef58e4277f1b039f48afb46a64a6b776f116a288c821638b4d0457fbcfa759
+apple_full (exclude_photo): 443f783c3d52801b2c525e7ba0a2989f50a7df53432b828ab04d0f8b224c3ec1
+apple_full_rewritten: d4ef58e4277f1b039f48afb46a64a6b776f116a288c821638b4d0457fbcfa759
+apple_full_rewritten (exclude_photo): 443f783c3d52801b2c525e7ba0a2989f50a7df53432b828ab04d0f8b224c3ec1
+apple_group: a7b6df6ce9d1263fa314b3cfef486e9635a9219b3c37901f99b1f3ff50fd8f29
+apple_group (exclude_photo): a7b6df6ce9d1263fa314b3cfef486e9635a9219b3c37901f99b1f3ff50fd8f29
