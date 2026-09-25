@@ -17,7 +17,7 @@ cg-database = { path = "crates/database" }
 
 # Error handling
 anyhow = "1.0.104"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 
 # Database
 sea-orm = { version = "2.0.3", features = [
