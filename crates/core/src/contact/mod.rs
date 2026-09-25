@@ -5,4 +5,4 @@ mod model;
 mod vcard;
 
 pub use model::{ConflictWinner, ETag, Href, Side, Uid};
-pub use vcard::{CANONICAL_VERSION, CardHash, HashOptions, Param, Property, VCard, VCardError};
+pub use vcard::{CANONICAL_VERSION, CardHash, DisplayIdentity, HashOptions, MatchKeys, Param, Property, VCard, VCardError};

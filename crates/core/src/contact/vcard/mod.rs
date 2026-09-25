@@ -4,12 +4,15 @@
 //! or error messages — only the UID, property names, counts and line numbers.
 
 mod canonical;
+mod identity;
 mod parser;
 mod photo;
+mod text;
 
 use std::{fmt, ops::Range};
 
 pub use canonical::{CANONICAL_VERSION, CardHash, HashOptions};
+pub use identity::{DisplayIdentity, MatchKeys};
 
 use super::Uid;
 
