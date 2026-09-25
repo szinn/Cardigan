@@ -4,3 +4,4 @@
 pub(crate) mod prelude;
 
 pub(crate) mod contacts;
+pub(crate) mod endpoints;

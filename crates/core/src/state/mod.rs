@@ -3,7 +3,11 @@
 //! them.
 
 mod contact_state;
+mod endpoint;
 
 #[cfg(test)]
 pub(crate) use contact_state::MockContactStateRepository;
 pub use contact_state::{ContactState, ContactStateId, ContactStateRepository, NewContactState, SideState};
+#[cfg(test)]
+pub(crate) use endpoint::MockEndpointRepository;
+pub use endpoint::{Endpoint, EndpointRepository};
