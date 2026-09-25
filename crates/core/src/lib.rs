@@ -1,6 +1,7 @@
 pub mod contact;
 pub mod error;
 pub mod repository;
+pub mod state;
 
 use std::sync::Arc;
 

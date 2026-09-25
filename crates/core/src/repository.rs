@@ -2,12 +2,13 @@ use std::{any::Any, pin::Pin, sync::Arc};
 
 use derive_builder::Builder;
 
-use crate::Error;
+use crate::{Error, state::ContactStateRepository};
 
 #[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct RepositoryService {
     repository: Arc<dyn Repository>,
+    contact_state_repository: Arc<dyn ContactStateRepository>,
 }
 
 impl RepositoryService {
@@ -15,6 +16,11 @@ impl RepositoryService {
     #[must_use]
     pub fn repository(&self) -> &Arc<dyn Repository> {
         &self.repository
+    }
+
+    #[must_use]
+    pub fn contact_state_repository(&self) -> &Arc<dyn ContactStateRepository> {
+        &self.contact_state_repository
     }
 }
 
@@ -143,7 +149,7 @@ pub(crate) mod testing {
     use std::{any::Any, sync::Arc};
 
     use super::{MockRepository, RepositoryServiceBuilder, Transaction};
-    use crate::Error;
+    use crate::{Error, state::MockContactStateRepository};
 
     /// A no-op transaction for unit tests.
     pub(crate) struct MockTransaction;
@@ -178,6 +184,8 @@ pub(crate) mod testing {
     /// for all repositories. Override individual fields for the repo(s) under
     /// test before calling `.build()`.
     pub(crate) fn default_repository_service_builder() -> RepositoryServiceBuilder {
-        RepositoryServiceBuilder::default().repository(Arc::new(make_mock_repo()))
+        RepositoryServiceBuilder::default()
+            .repository(Arc::new(make_mock_repo()))
+            .contact_state_repository(Arc::new(MockContactStateRepository::new()))
     }
 }
