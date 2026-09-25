@@ -20,6 +20,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+mockall.workspace = true
 insta.workspace = true
 
 [lints]

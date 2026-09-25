@@ -30,6 +30,15 @@ mod sqlite_busy {
     pub const LOCKED: &str = "6";
 }
 
+/// SQLite `SQLITE_READONLY` (primary result code 8). Raised on any write
+/// while `PRAGMA query_only` is on (our read-only transactions). sqlx
+/// reports the extended result code, whose low byte is the primary code.
+mod sqlite_readonly {
+    pub fn matches(code: &str) -> bool {
+        code.parse::<u32>().is_ok_and(|c| c & 0xff == 8)
+    }
+}
+
 #[allow(clippy::needless_pass_by_value, reason = "Required for map_err")]
 pub fn handle_dberr(error: DbErr) -> RepositoryError {
     // Connectivity errors: network/DNS failure, pool exhaustion, closed pool.
@@ -84,6 +93,7 @@ pub fn handle_dberr(error: DbErr) -> RepositoryError {
                 tracing::warn!(error_code = %code, error = %error, "Database busy/locked — transient, will retry");
                 RepositoryError::Busy(error.to_string())
             }
+            c if sqlite_readonly::matches(c) => RepositoryError::ReadOnly,
             _ => {
                 tracing::error!(error_code = %code, error = %error, "Unhandled database error code");
                 RepositoryError::Database(error.to_string())
