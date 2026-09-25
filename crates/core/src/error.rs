@@ -1,3 +1,5 @@
+use crate::contact::VCardError;
+
 /// Categorizes errors for response mapping in adapters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -45,6 +47,9 @@ pub enum Error {
     #[error(transparent)]
     RepositoryError(#[from] RepositoryError),
 
+    #[error(transparent)]
+    VCard(#[from] VCardError),
+
     #[cfg(any(test, feature = "test-support"))]
     #[error("Mock not configured: {0}")]
     MockNotConfigured(&'static str),
@@ -56,7 +61,7 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::InvalidId(_) | Self::InvalidPageSize(_) | Self::InvalidToken(_) => ErrorKind::BadRequest,
-            Self::Validation(_) => ErrorKind::InvalidInput,
+            Self::Validation(_) | Self::VCard(_) => ErrorKind::InvalidInput,
             Self::InvalidTransactionType | Self::Infrastructure(_) | Self::Unimplemented(_) => ErrorKind::Internal,
             Self::RepositoryError(e) => e.kind(),
             #[cfg(any(test, feature = "test-support"))]
