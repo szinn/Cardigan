@@ -117,21 +117,30 @@ impl ContactStateRepository for ContactStateRepositoryAdapter {
             .await
             .map_err(handle_dberr)?
             .ok_or(Error::RepositoryError(RepositoryError::NotFound))?;
-        // Safe without a guarded `UPDATE … WHERE version = ?`: all access goes
-        // through one connection, and this read and the write below share one
-        // transaction.
+        // Safe without a guarded `UPDATE … WHERE version = ?`: the read and
+        // write below share one transaction, and SQLite's WAL snapshot
+        // isolation means a writer that raced past this check on a stale
+        // snapshot fails at commit with `BUSY_SNAPSHOT`, not a silent
+        // overwrite.
         if existing.version as u64 != state.version {
             return Err(Error::RepositoryError(RepositoryError::Conflict));
         }
+
+        // `mark_seen` updates `*_last_seen_at` without bumping `version`, so
+        // a caller's snapshot can be stale on `last_seen_at` alone even
+        // though the version check above passed. Never roll it backwards:
+        // keep the later of what's stored and what the caller supplied.
+        let icloud_last_seen_at = existing.icloud_last_seen_at.max(state.icloud.last_seen_at.into());
+        let fastmail_last_seen_at = existing.fastmail_last_seen_at.max(state.fastmail.last_seen_at.into());
 
         let mut updater = existing.into_active_model();
         updater.uid = Set(state.uid.into_string());
         updater.icloud_href = Set(state.icloud.href.into_string());
         updater.icloud_etag = Set(state.icloud.etag.into_string());
-        updater.icloud_last_seen_at = Set(state.icloud.last_seen_at.into());
+        updater.icloud_last_seen_at = Set(icloud_last_seen_at);
         updater.fastmail_href = Set(state.fastmail.href.into_string());
         updater.fastmail_etag = Set(state.fastmail.etag.into_string());
-        updater.fastmail_last_seen_at = Set(state.fastmail.last_seen_at.into());
+        updater.fastmail_last_seen_at = Set(fastmail_last_seen_at);
         updater.content_hash = Set(state.content_hash.as_hex());
         updater.hash_version = Set(i64::from(state.hash_version));
         updater.photo_stripped = Set(state.photo_stripped);
@@ -331,6 +340,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_does_not_roll_back_mark_seen() {
+        let svc = setup().await;
+        let repo = svc.contact_state_repository();
+        let tx = svc.repository().begin().await.unwrap();
+        let added = repo.add(&*tx, new_state("u1")).await.unwrap();
+
+        repo.mark_seen(&*tx, Side::Fastmail, &[Uid::from("u1")], at(100)).await.unwrap();
+
+        // Stale snapshot from before `mark_seen`: version still matches, but
+        // `fastmail.last_seen_at` is the old, now-stale value.
+        let mut stale_snapshot = added.clone();
+        stale_snapshot.photo_stripped = true;
+        let updated = repo.update(&*tx, stale_snapshot).await.unwrap();
+
+        assert_eq!(updated.fastmail.last_seen_at, at(100), "mark_seen's later last_seen_at must not be rolled back");
+        assert_eq!(updated.icloud.last_seen_at, at(0));
+
+        let found = repo.find_by_uid(&*tx, &Uid::from("u1")).await.unwrap().unwrap();
+        assert_eq!(found.fastmail.last_seen_at, at(100));
+        assert_eq!(found.icloud.last_seen_at, at(0));
+    }
+
+    #[tokio::test]
     async fn update_missing_row_is_not_found() {
         let svc = setup().await;
         let repo = svc.contact_state_repository();
@@ -412,36 +444,64 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn corrupt_content_hash_is_database_error() {
-        let svc = setup().await;
-        let tx = svc.repository().begin().await.unwrap();
-        let db_tx = TransactionImpl::get_db_transaction(&*tx).unwrap();
-        let bad = contacts::ActiveModel {
+    /// A structurally valid raw row for `uid`, for tests that then corrupt
+    /// exactly one column and check how `find_by_uid` reports it.
+    fn raw_contact_row(uid: &str) -> contacts::ActiveModel {
+        contacts::ActiveModel {
             version: Set(0),
-            uid: Set("u1".to_owned()),
-            icloud_href: Set("/icloud/u1.vcf".to_owned()),
+            uid: Set(uid.to_owned()),
+            icloud_href: Set(format!("/icloud/{uid}.vcf")),
             icloud_etag: Set("\"e\"".to_owned()),
             icloud_last_seen_at: Set(at(0).into()),
-            fastmail_href: Set("/fastmail/u1.vcf".to_owned()),
+            fastmail_href: Set(format!("/fastmail/{uid}.vcf")),
             fastmail_etag: Set("\"e\"".to_owned()),
             fastmail_last_seen_at: Set(at(0).into()),
-            content_hash: Set("not-hex".to_owned()),
+            content_hash: Set("ab".repeat(32)),
             hash_version: Set(1),
             photo_stripped: Set(false),
-            last_synced_vcard: Set(card_bytes("u1")),
+            last_synced_vcard: Set(card_bytes(uid)),
             last_synced_at: Set(at(0).into()),
             created_at: Set(at(0).into()),
             updated_at: Set(at(0).into()),
             ..Default::default()
-        };
+        }
+    }
+
+    /// Inserts `bad` raw (bypassing domain validation) and asserts that
+    /// reading it back through `find_by_uid` reports a `Database` error
+    /// naming `contacts` and `column`, without leaking card content.
+    async fn assert_corrupt_row_is_database_error(bad: contacts::ActiveModel, uid: &str, column: &str) {
+        let svc = setup().await;
+        let tx = svc.repository().begin().await.unwrap();
+        let db_tx = TransactionImpl::get_db_transaction(&*tx).unwrap();
         bad.insert(db_tx).await.unwrap();
 
-        let err = svc.contact_state_repository().find_by_uid(&*tx, &Uid::from("u1")).await.unwrap_err();
+        let err = svc.contact_state_repository().find_by_uid(&*tx, &Uid::from(uid)).await.unwrap_err();
         let Error::RepositoryError(RepositoryError::Database(message)) = err else {
             panic!("expected Database error, got {err:?}");
         };
-        assert!(message.contains("contacts") && message.contains("content_hash"), "{message}");
+        assert!(message.contains("contacts") && message.contains(column), "{message}");
         assert!(!message.contains("Zoë"), "no card content in errors: {message}");
+    }
+
+    #[tokio::test]
+    async fn corrupt_content_hash_is_database_error() {
+        let mut bad = raw_contact_row("u1");
+        bad.content_hash = Set("not-hex".to_owned());
+        assert_corrupt_row_is_database_error(bad, "u1", "content_hash").await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_hash_version_is_database_error() {
+        let mut bad = raw_contact_row("u1");
+        bad.hash_version = Set(300);
+        assert_corrupt_row_is_database_error(bad, "u1", "hash_version").await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_last_synced_vcard_is_database_error() {
+        let mut bad = raw_contact_row("u1");
+        bad.last_synced_vcard = Set(b"not a vcard".to_vec());
+        assert_corrupt_row_is_database_error(bad, "u1", "last_synced_vcard").await;
     }
 }

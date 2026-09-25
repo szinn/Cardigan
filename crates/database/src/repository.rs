@@ -53,8 +53,9 @@ impl Repository for RepositoryImpl {
 /// `query_only`, which makes the connection reject every write with
 /// `SQLITE_READONLY`. It is a connection setting, not a transaction one, and
 /// survives commit, rollback and drop. So every `begin` sets it explicitly.
-/// This is sound because `open_database` gives SQLite a single pooled
-/// connection.
+/// This is sound as long as every access to the connection goes through
+/// `Repository::begin`/`begin_read_only`, which set the flag on whatever
+/// connection they get.
 async fn set_query_only(transaction: &DatabaseTransaction, on: bool) -> Result<(), Error> {
     if transaction.get_database_backend() != DatabaseBackend::Sqlite {
         return Ok(());

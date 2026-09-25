@@ -93,7 +93,10 @@ pub fn handle_dberr(error: DbErr) -> RepositoryError {
                 tracing::warn!(error_code = %code, error = %error, "Database busy/locked — transient, will retry");
                 RepositoryError::Busy(error.to_string())
             }
-            c if sqlite_readonly::matches(c) => RepositoryError::ReadOnly,
+            c if sqlite_readonly::matches(c) => {
+                tracing::warn!(error_code = %code, error = %error, "SQLITE_READONLY — query_only, read-only mount or file permissions");
+                RepositoryError::ReadOnly
+            }
             _ => {
                 tracing::error!(error_code = %code, error = %error, "Unhandled database error code");
                 RepositoryError::Database(error.to_string())

@@ -80,8 +80,10 @@ pub trait ContactStateRepository: Send + Sync {
 
     /// Writes every field of `state` to the row with `state.id`, provided the
     /// stored version still equals `state.version`; returns the row with its
-    /// bumped version. A missing row is `NotFound`; a moved-on row is
-    /// `Conflict`.
+    /// bumped version. `last_seen_at` never moves backwards: for each side it
+    /// keeps the later of the stored value and `state.<side>.last_seen_at`,
+    /// since `mark_seen` updates it without bumping `version`. A missing row
+    /// is `NotFound`; a moved-on row is `Conflict`.
     async fn update(&self, transaction: &dyn Transaction, state: ContactState) -> Result<ContactState, Error>;
 
     /// Sets `side`'s `last_seen_at` for every listed uid that has a row,
