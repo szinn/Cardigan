@@ -6,7 +6,7 @@
 "cargo:cargo-insta" = "1.48.0"
 "cargo:cargo-nextest" = "0.9.146"
 "git-cliff" = "2.14.2"
-"prettier" = "3.9.8"
+"prettier" = "3.9.9"
 
 [tasks.fmt-code]
 description = "Format code"
