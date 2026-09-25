@@ -1,5 +1,6 @@
 use std::{fmt, path::PathBuf, str::FromStr, time::Duration};
 
+use cg_core::contact::ConflictWinner;
 use serde::Deserialize;
 
 use crate::error::Error;
@@ -31,26 +32,6 @@ pub struct EndpointConfig {
     pub url: String,
     pub username: String,
     pub password: Secret,
-}
-
-/// Which side wins when a card changed on both sides since the last sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ConflictWinner {
-    #[default]
-    ICloud,
-    Fastmail,
-}
-
-impl FromStr for ConflictWinner {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "icloud" => Ok(Self::ICloud),
-            "fastmail" => Ok(Self::Fastmail),
-            _ => Err(format!("expected `icloud` or `fastmail`, got `{s}`")),
-        }
-    }
 }
 
 /// A credential that must never appear in logs. `Debug` is redacted; use
@@ -167,7 +148,7 @@ impl TryFrom<RawConfig> for Config {
             },
             poll_interval: Duration::from_secs(poll_interval_secs),
             database_path: PathBuf::from(database_path),
-            conflict_winner: parse_or(raw.conflict_winner, "CARDIGAN_CONFLICT_WINNER", ConflictWinner::default())?,
+            conflict_winner: parse_or(raw.conflict_winner, "CARDIGAN_CONFLICT_WINNER", ConflictWinner::ICloud)?,
             max_photo_bytes: parse_or(raw.max_photo_bytes, "CARDIGAN_MAX_PHOTO_BYTES", DEFAULT_MAX_PHOTO_BYTES)?,
         })
     }

@@ -17,3 +17,6 @@ async-trait.workspace = true
 derive_builder.workspace = true
 mockall = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[lints]
+workspace = true
