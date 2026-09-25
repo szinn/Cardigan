@@ -40,6 +40,14 @@ pub enum Write {
 /// `If-None-Match`, serves real sync-token deltas from a change log, records
 /// every write attempt, and can inject faults. Safe to share across tasks;
 /// the lock is never held across an `.await`.
+///
+/// Diverges from a real adapter in a few ways: it needs no `discover()`
+/// before use; `changed`, `removed` and `list_etags` come back in href order
+/// (a real server's order is arbitrary — do not depend on it); it accepts any
+/// href, including ones outside its collection; and it stores bodies verbatim
+/// and never rewrites them (to simulate a server rewrite, follow a `put` with
+/// `external_put`). Tests should use synthetic cards, since `Write` and
+/// `card()` expose full bodies.
 pub struct InMemoryAddressBook {
     state: Mutex<State>,
 }
@@ -180,7 +188,6 @@ impl State {
 }
 
 #[async_trait::async_trait]
-#[allow(clippy::ref_option_ref, reason = "signature fixed by the AddressBook trait")]
 impl AddressBook for InMemoryAddressBook {
     async fn discover(&self) -> Result<Collection, Error> {
         let mut state = self.state();

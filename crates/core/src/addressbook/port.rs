@@ -19,7 +19,10 @@ pub trait AddressBook: Send + Sync {
 
     /// With `None`: the full membership with ETags and a fresh token. With a
     /// token: what changed since it, or `Changes::TokenInvalid` when the
-    /// server rejects it.
+    /// server rejects it. The returned delta is complete: when the server
+    /// truncates a `sync-collection` response (RFC 6578: 507 on the request
+    /// URI with an intermediate token), the adapter keeps requesting until it
+    /// has the whole delta.
     async fn changes_since(&self, token: Option<&SyncToken>) -> Result<Changes, Error>;
 
     /// Every resource with its ETag (PROPFIND depth 1), for collections that
@@ -34,9 +37,17 @@ pub trait AddressBook: Send + Sync {
     /// ETag, or `None` when the server did not send one: the caller must then
     /// fetch it with `multiget` so the next poll recognises its own write. A
     /// failed precondition is `AddressBookError::PreconditionFailed`.
+    ///
+    /// For a create (`Precondition::IfNoneMatch`), the caller mints `href`: a
+    /// new resource name inside the collection (`Collection::addressbook_url`'s
+    /// path followed by `<name>.vcf`), expressed like every `Href` as the
+    /// server path, not an absolute URL.
     async fn put(&self, href: &Href, body: &[u8], precondition: Precondition) -> Result<Option<ETag>, Error>;
 
     /// Deletes the resource, guarded by `if_match` when given. A resource
-    /// that is already gone is success.
+    /// that is already gone is success: a strictly conforming server may
+    /// answer `If-Match` on it with 412 rather than 404, so before reporting
+    /// `PreconditionFailed` the adapter must confirm the resource still
+    /// exists, and report success if it does not.
     async fn delete(&self, href: &Href, if_match: Option<&ETag>) -> Result<(), Error>;
 }

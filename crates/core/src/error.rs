@@ -158,8 +158,9 @@ pub enum AddressBookError {
     #[error("CardDAV authentication failed")]
     Unauthorized,
 
-    /// Any other failure the next attempt will not fix: another 4xx, or a
-    /// malformed response.
+    /// Any other failure retrying the same request will not fix: another
+    /// 4xx, or a malformed response. A 404/410 on a cached host may still
+    /// clear on re-discovery, if the collection moved.
     #[error("CardDAV error: {0}")]
     Permanent(String),
 }
