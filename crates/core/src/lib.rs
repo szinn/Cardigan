@@ -1,3 +1,4 @@
+pub mod addressbook;
 pub mod contact;
 pub mod error;
 pub mod repository;
@@ -6,7 +7,7 @@ pub mod state;
 use std::sync::Arc;
 
 use derive_builder::Builder;
-pub use error::{Error, ErrorKind, RepositoryError};
+pub use error::{AddressBookError, Error, ErrorKind, RepositoryError};
 
 use crate::repository::RepositoryService;
 

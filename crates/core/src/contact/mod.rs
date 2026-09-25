@@ -4,5 +4,6 @@
 mod model;
 mod vcard;
 
+pub(crate) use model::string_id;
 pub use model::{ConflictWinner, ETag, Href, Side, Uid};
 pub use vcard::{CANONICAL_VERSION, CardHash, DisplayIdentity, HashOptions, MatchKeys, Param, Property, VCard, VCardError};
