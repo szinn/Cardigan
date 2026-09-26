@@ -11,7 +11,7 @@ use crate::{
     client::HttpClient,
     config::{CardDavConfig, ProviderQuirks},
     discovery::{self, Bound},
-    multiget, sync,
+    multiget, sync, write,
 };
 
 /// `AddressBook` over CardDAV for one side. Call `discover` first: every
@@ -52,11 +52,6 @@ impl CardDavAddressBook {
     }
 }
 
-/// Placeholder until the operation's task lands (Tasks 4–6 replace each).
-fn not_implemented(operation: &str) -> Error {
-    AddressBookError::Permanent(format!("{operation} is not implemented yet")).into()
-}
-
 #[async_trait::async_trait]
 impl AddressBook for CardDavAddressBook {
     async fn discover(&self) -> Result<Collection, Error> {
@@ -80,13 +75,13 @@ impl AddressBook for CardDavAddressBook {
         Ok(multiget::multiget(&self.http, &bound, self.quirks.multiget_batch, hrefs).await?)
     }
 
-    async fn put(&self, _href: &Href, _body: &[u8], _precondition: Precondition) -> Result<Option<ETag>, Error> {
-        self.bound()?;
-        Err(not_implemented("put"))
+    async fn put(&self, href: &Href, body: &[u8], precondition: Precondition) -> Result<Option<ETag>, Error> {
+        let bound = self.bound()?;
+        Ok(write::put(&self.http, &bound, href, body, &precondition).await?)
     }
 
-    async fn delete(&self, _href: &Href, _if_match: Option<&ETag>) -> Result<(), Error> {
-        self.bound()?;
-        Err(not_implemented("delete"))
+    async fn delete(&self, href: &Href, if_match: Option<&ETag>) -> Result<(), Error> {
+        let bound = self.bound()?;
+        Ok(write::delete(&self.http, &bound, href, if_match).await?)
     }
 }

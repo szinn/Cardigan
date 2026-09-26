@@ -2,8 +2,6 @@
 //! `sync-collection`, `addressbook-multiget` and conditional writes, over
 //! reqwest with rustls. Card bodies are full contact data (PII): this crate
 //! never logs them.
-#![allow(dead_code, reason = "CG-5 lands in six changesets; Task 6 wires every helper into the adapter and removes this")]
-
 mod adapter;
 mod client;
 mod config;
@@ -14,6 +12,7 @@ mod multiget;
 mod sync;
 #[cfg(test)]
 mod test_util;
+mod write;
 mod xml;
 
 pub use adapter::CardDavAddressBook;
