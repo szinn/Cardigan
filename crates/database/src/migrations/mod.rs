@@ -4,6 +4,7 @@ mod m20260925_000001_create_contacts_table;
 mod m20260925_000002_create_endpoints_table;
 mod m20260925_000003_create_conflicts_table;
 mod m20260925_000004_create_card_failures_table;
+mod m20260925_000005_create_baseline_skips_table;
 
 pub struct Migrator;
 
@@ -15,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260925_000002_create_endpoints_table::Migration),
             Box::new(m20260925_000003_create_conflicts_table::Migration),
             Box::new(m20260925_000004_create_card_failures_table::Migration),
+            Box::new(m20260925_000005_create_baseline_skips_table::Migration),
         ]
     }
 }

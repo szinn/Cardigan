@@ -4,7 +4,7 @@ use derive_builder::Builder;
 
 use crate::{
     Error,
-    state::{CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository},
+    state::{BaselineSkipRepository, CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository},
 };
 
 #[derive(Builder)]
@@ -15,6 +15,7 @@ pub struct RepositoryService {
     endpoint_repository: Arc<dyn EndpointRepository>,
     conflict_repository: Arc<dyn ConflictRepository>,
     card_failure_repository: Arc<dyn CardFailureRepository>,
+    baseline_skip_repository: Arc<dyn BaselineSkipRepository>,
 }
 
 impl RepositoryService {
@@ -42,6 +43,11 @@ impl RepositoryService {
     #[must_use]
     pub fn card_failure_repository(&self) -> &Arc<dyn CardFailureRepository> {
         &self.card_failure_repository
+    }
+
+    #[must_use]
+    pub fn baseline_skip_repository(&self) -> &Arc<dyn BaselineSkipRepository> {
+        &self.baseline_skip_repository
     }
 }
 
@@ -172,7 +178,7 @@ pub(crate) mod testing {
     use super::{MockRepository, RepositoryServiceBuilder, Transaction};
     use crate::{
         Error,
-        state::{MockCardFailureRepository, MockConflictRepository, MockContactStateRepository, MockEndpointRepository},
+        state::{MockBaselineSkipRepository, MockCardFailureRepository, MockConflictRepository, MockContactStateRepository, MockEndpointRepository},
     };
 
     /// A no-op transaction for unit tests.
@@ -214,5 +220,6 @@ pub(crate) mod testing {
             .endpoint_repository(Arc::new(MockEndpointRepository::new()))
             .conflict_repository(Arc::new(MockConflictRepository::new()))
             .card_failure_repository(Arc::new(MockCardFailureRepository::new()))
+            .baseline_skip_repository(Arc::new(MockBaselineSkipRepository::new()))
     }
 }

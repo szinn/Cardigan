@@ -1,12 +1,17 @@
 //! Sync state: what the daemon last synced, per contact and per endpoint,
-//! plus the conflict history and failing cards. These traits are the spec's
-//! sync-state port; `cg-database` implements them.
+//! plus the conflict history, failing cards and ambiguous baseline cards.
+//! These traits are the spec's sync-state port; `cg-database` implements
+//! them.
 
+mod baseline_skip;
 mod card_failure;
 mod conflict;
 mod contact_state;
 mod endpoint;
 
+#[cfg(test)]
+pub(crate) use baseline_skip::MockBaselineSkipRepository;
+pub use baseline_skip::{BaselineSkip, BaselineSkipId, BaselineSkipRepository, NewBaselineSkip};
 #[cfg(test)]
 pub(crate) use card_failure::MockCardFailureRepository;
 pub use card_failure::{BackoffPolicy, CardFailure, CardFailureId, CardFailureRepository, FailedCard, FailureOp, FailureReason};

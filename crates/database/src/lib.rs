@@ -13,7 +13,7 @@ use std::sync::Arc;
 use cg_core::{
     Error,
     repository::{Repository, RepositoryService, RepositoryServiceBuilder},
-    state::{CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository},
+    state::{BaselineSkipRepository, CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository},
 };
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -24,8 +24,8 @@ pub use error::*;
 
 use crate::{
     adapters::{
-        card_failure::CardFailureRepositoryAdapter, conflict::ConflictRepositoryAdapter, contact_state::ContactStateRepositoryAdapter,
-        endpoint::EndpointRepositoryAdapter,
+        baseline_skip::BaselineSkipRepositoryAdapter, card_failure::CardFailureRepositoryAdapter, conflict::ConflictRepositoryAdapter,
+        contact_state::ContactStateRepositoryAdapter, endpoint::EndpointRepositoryAdapter,
     },
     migrations::Migrator,
     repository::RepositoryImpl,
@@ -85,6 +85,7 @@ pub async fn create_repository_service(database: DatabaseConnection) -> Result<A
         .endpoint_repository(Arc::new(EndpointRepositoryAdapter::new()) as Arc<dyn EndpointRepository>)
         .conflict_repository(Arc::new(ConflictRepositoryAdapter::new()) as Arc<dyn ConflictRepository>)
         .card_failure_repository(Arc::new(CardFailureRepositoryAdapter::new()) as Arc<dyn CardFailureRepository>)
+        .baseline_skip_repository(Arc::new(BaselineSkipRepositoryAdapter::new()) as Arc<dyn BaselineSkipRepository>)
         .build()
         .map_err(|e| Error::Infrastructure(e.to_string()))?;
 
