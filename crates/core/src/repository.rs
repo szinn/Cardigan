@@ -4,7 +4,7 @@ use derive_builder::Builder;
 
 use crate::{
     Error,
-    state::{ContactStateRepository, EndpointRepository},
+    state::{ConflictRepository, ContactStateRepository, EndpointRepository},
 };
 
 #[derive(Builder)]
@@ -13,6 +13,7 @@ pub struct RepositoryService {
     repository: Arc<dyn Repository>,
     contact_state_repository: Arc<dyn ContactStateRepository>,
     endpoint_repository: Arc<dyn EndpointRepository>,
+    conflict_repository: Arc<dyn ConflictRepository>,
 }
 
 impl RepositoryService {
@@ -30,6 +31,11 @@ impl RepositoryService {
     #[must_use]
     pub fn endpoint_repository(&self) -> &Arc<dyn EndpointRepository> {
         &self.endpoint_repository
+    }
+
+    #[must_use]
+    pub fn conflict_repository(&self) -> &Arc<dyn ConflictRepository> {
+        &self.conflict_repository
     }
 }
 
@@ -160,7 +166,7 @@ pub(crate) mod testing {
     use super::{MockRepository, RepositoryServiceBuilder, Transaction};
     use crate::{
         Error,
-        state::{MockContactStateRepository, MockEndpointRepository},
+        state::{MockConflictRepository, MockContactStateRepository, MockEndpointRepository},
     };
 
     /// A no-op transaction for unit tests.
@@ -200,5 +206,6 @@ pub(crate) mod testing {
             .repository(Arc::new(make_mock_repo()))
             .contact_state_repository(Arc::new(MockContactStateRepository::new()))
             .endpoint_repository(Arc::new(MockEndpointRepository::new()))
+            .conflict_repository(Arc::new(MockConflictRepository::new()))
     }
 }

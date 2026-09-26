@@ -2,6 +2,7 @@ pub use sea_orm_migration::prelude::*;
 
 mod m20260925_000001_create_contacts_table;
 mod m20260925_000002_create_endpoints_table;
+mod m20260925_000003_create_conflicts_table;
 
 pub struct Migrator;
 
@@ -11,6 +12,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260925_000001_create_contacts_table::Migration),
             Box::new(m20260925_000002_create_endpoints_table::Migration),
+            Box::new(m20260925_000003_create_conflicts_table::Migration),
         ]
     }
 }

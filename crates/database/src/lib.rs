@@ -13,7 +13,7 @@ use std::sync::Arc;
 use cg_core::{
     Error,
     repository::{Repository, RepositoryService, RepositoryServiceBuilder},
-    state::{ContactStateRepository, EndpointRepository},
+    state::{ConflictRepository, ContactStateRepository, EndpointRepository},
 };
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
@@ -23,7 +23,7 @@ pub mod error;
 pub use error::*;
 
 use crate::{
-    adapters::{contact_state::ContactStateRepositoryAdapter, endpoint::EndpointRepositoryAdapter},
+    adapters::{conflict::ConflictRepositoryAdapter, contact_state::ContactStateRepositoryAdapter, endpoint::EndpointRepositoryAdapter},
     migrations::Migrator,
     repository::RepositoryImpl,
 };
@@ -80,6 +80,7 @@ pub async fn create_repository_service(database: DatabaseConnection) -> Result<A
         .repository(Arc::new(RepositoryImpl::new(database)) as Arc<dyn Repository>)
         .contact_state_repository(Arc::new(ContactStateRepositoryAdapter::new()) as Arc<dyn ContactStateRepository>)
         .endpoint_repository(Arc::new(EndpointRepositoryAdapter::new()) as Arc<dyn EndpointRepository>)
+        .conflict_repository(Arc::new(ConflictRepositoryAdapter::new()) as Arc<dyn ConflictRepository>)
         .build()
         .map_err(|e| Error::Infrastructure(e.to_string()))?;
 
