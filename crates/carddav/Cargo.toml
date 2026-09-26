@@ -12,6 +12,7 @@ repository = { workspace = true }
 [dependencies]
 cg-core.workspace = true
 
+async-trait.workspace = true
 httpdate.workspace = true
 percent-encoding.workspace = true
 reqwest.workspace = true
