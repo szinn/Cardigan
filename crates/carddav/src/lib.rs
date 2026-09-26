@@ -10,6 +10,7 @@ mod config;
 mod discovery;
 mod error;
 mod href;
+mod multiget;
 mod sync;
 #[cfg(test)]
 mod test_util;
