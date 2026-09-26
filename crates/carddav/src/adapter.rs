@@ -11,6 +11,7 @@ use crate::{
     client::HttpClient,
     config::{CardDavConfig, ProviderQuirks},
     discovery::{self, Bound},
+    sync,
 };
 
 /// `AddressBook` over CardDAV for one side. Call `discover` first: every
@@ -64,14 +65,14 @@ impl AddressBook for CardDavAddressBook {
         Ok(collection)
     }
 
-    async fn changes_since(&self, _token: Option<&SyncToken>) -> Result<Changes, Error> {
-        self.bound()?;
-        Err(not_implemented("changes_since"))
+    async fn changes_since(&self, token: Option<&SyncToken>) -> Result<Changes, Error> {
+        let bound = self.bound()?;
+        Ok(sync::changes_since(&self.http, &bound, token).await?)
     }
 
     async fn list_etags(&self) -> Result<Vec<(Href, ETag)>, Error> {
-        self.bound()?;
-        Err(not_implemented("list_etags"))
+        let bound = self.bound()?;
+        Ok(sync::list_etags(&self.http, &bound).await?)
     }
 
     async fn multiget(&self, _hrefs: &[Href]) -> Result<MultigetResult, Error> {
