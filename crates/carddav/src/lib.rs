@@ -7,7 +7,9 @@
 mod client;
 mod config;
 mod error;
+mod href;
 #[cfg(test)]
 mod test_util;
+mod xml;
 
 pub use config::{CardDavConfig, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MULTIGET_BATCH, DEFAULT_REQUEST_TIMEOUT, ProviderQuirks};
