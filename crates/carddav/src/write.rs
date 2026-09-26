@@ -161,6 +161,7 @@ mod tests {
         let adapter = discovered(&server).await;
         Mock::given(method("PUT"))
             .respond_with(ResponseTemplate::new(204).insert_header("ETag", "W/\"weak-1\""))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -173,7 +174,11 @@ mod tests {
     async fn stale_etag_is_precondition_failed() {
         let server = MockServer::start().await;
         let adapter = discovered(&server).await;
-        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(412)).mount(&server).await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(412))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let error = adapter.put(&href("a"), CARD, Precondition::IfMatch(ETag::from("\"old\""))).await.unwrap_err();
 
@@ -189,6 +194,7 @@ mod tests {
         let adapter = discovered(&server).await;
         Mock::given(method("PUT"))
             .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "10"))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -225,7 +231,11 @@ mod tests {
         for status in [404, 410] {
             let server = MockServer::start().await;
             let adapter = discovered(&server).await;
-            Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(status)).mount(&server).await;
+            Mock::given(method("DELETE"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
 
             adapter.delete(&href("a"), None).await.unwrap();
         }
@@ -238,6 +248,7 @@ mod tests {
         Mock::given(method("DELETE"))
             .and(path("/home/card/a.vcf"))
             .respond_with(ResponseTemplate::new(412))
+            .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PROPFIND"))
@@ -255,13 +266,18 @@ mod tests {
     async fn delete_412_on_live_resource_is_precondition_failed() {
         let server = MockServer::start().await;
         let adapter = discovered(&server).await;
-        Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(412)).mount(&server).await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(412))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("PROPFIND"))
             .and(path("/home/card/a.vcf"))
             .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(
                 "<d:response><d:href>/home/card/a.vcf</d:href><d:propstat><d:prop><d:getetag>\"e2\"</d:getetag></d:prop><d:status>HTTP/1.1 200 \
                  OK</d:status></d:propstat></d:response>",
             )))
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -277,7 +293,11 @@ mod tests {
     async fn delete_unauthorized() {
         let server = MockServer::start().await;
         let adapter = discovered(&server).await;
-        Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(401)).mount(&server).await;
+        Mock::given(method("DELETE"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let error = adapter.delete(&href("a"), None).await.unwrap_err();
 

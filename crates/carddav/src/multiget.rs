@@ -24,6 +24,7 @@ pub(crate) async fn multiget(http: &HttpClient, bound: &Bound, batch: usize, hre
     let mut result = MultigetResult::default();
     for chunk in hrefs.chunks(batch.max(1)) {
         let requested: Vec<String> = chunk.iter().map(|href| normalize_path(href.as_str())).collect();
+        let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
         let request = DavRequest::new(report(), bound.collection_url.clone()).xml(request::addressbook_multiget(&requested));
         let response = http.send(request).await?;
         if !response.is(207) {
@@ -32,6 +33,11 @@ pub(crate) async fn multiget(http: &HttpClient, bound: &Bound, batch: usize, hre
         let mut answered = HashSet::new();
         for entry in multistatus::parse(&response.body)?.responses {
             let path = canonical_path(&entry.href, &bound.collection_url)?;
+            // A stray response (e.g. the collection itself, or a card not in
+            // this batch) is not classified: it is neither found nor missing.
+            if !requested_set.contains(path.as_str()) {
+                continue;
+            }
             answered.insert(path.clone());
             match classify(&context, entry)? {
                 Some((etag, body)) => result.found.push(FetchedCard {
@@ -87,7 +93,7 @@ mod tests {
     use super::*;
     use crate::{
         config::ProviderQuirks,
-        test_util::{discovered, discovered_with, multistatus},
+        test_util::{discovered, discovered_with, multistatus, plain_collection_entry},
         xml::request::escape,
     };
 
@@ -228,6 +234,33 @@ mod tests {
         assert!(result.missing.is_empty(), "matched href reported missing: {:?}", result.missing);
         assert_eq!(result.found.len(), 1);
         assert_eq!(result.found[0].href, Href::from("/home/card/a~b%C3%A9.vcf"));
+    }
+
+    #[tokio::test]
+    async fn stray_responses_outside_the_requested_batch_are_ignored() {
+        let server = MockServer::start().await;
+        let adapter = discovered(&server).await;
+        multiget_report()
+            .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(&format!(
+                "{}{}{}",
+                plain_collection_entry("/home/card/"),
+                card_entry("/home/card/a.vcf", "\"ea\"", CARD),
+                card_entry("/home/card/unrequested.vcf", "\"eu\"", CARD)
+            ))))
+            .mount(&server)
+            .await;
+
+        let result = adapter.multiget(&hrefs(&["a"])).await.unwrap();
+
+        assert_eq!(
+            result.found,
+            [FetchedCard {
+                href: Href::from("/home/card/a.vcf"),
+                etag: ETag::from("\"ea\""),
+                body: CARD.as_bytes().to_vec(),
+            }]
+        );
+        assert_eq!(result.missing, Vec::<Href>::new());
     }
 
     #[tokio::test]

@@ -52,6 +52,7 @@ pub(crate) async fn discover(http: &HttpClient, entry_url: &Url, quirks: &Provid
     let principal = find_principal(http, entry_url).await?;
     let home = find_home_set(http, &principal).await?;
     let (collection_url, supports_sync_collection) = select_collection(http, &home, quirks).await?;
+    refuse_if_insecure(http, &collection_url)?;
     let discovered_host = collection_url
         .host_str()
         .ok_or_else(|| AddressBookError::Permanent("address book URL has no host".into()))?
@@ -75,6 +76,7 @@ pub(crate) async fn discover(http: &HttpClient, entry_url: &Url, quirks: &Provid
 /// answered (hrefs resolve against it) and the parsed multistatus.
 async fn propfind_following(http: &HttpClient, url: &Url, depth: &'static str, body: &str) -> Result<(Url, Multistatus), AddressBookError> {
     let mut url = url.clone();
+    refuse_if_insecure(http, &url)?;
     for _ in 0..=MAX_REDIRECTS {
         let context = format!("PROPFIND {}", url.path());
         let response = http.send(DavRequest::new(propfind(), url.clone()).depth(depth).xml(body.to_owned())).await?;
@@ -87,18 +89,33 @@ async fn propfind_following(http: &HttpClient, url: &Url, depth: &'static str, b
                 let next = url
                     .join(location)
                     .map_err(|_| AddressBookError::Permanent(format!("{context}: invalid redirect Location")))?;
-                if !http.may_send_credentials(&next) {
-                    return Err(AddressBookError::Permanent(format!(
+                refuse_if_insecure(http, &next).map_err(|_| {
+                    AddressBookError::Permanent(format!(
                         "{context}: refusing insecure redirect to {}",
                         next.host_str().unwrap_or("an unknown host")
-                    )));
-                }
+                    ))
+                })?;
                 url = next;
             }
             _ => return Err(response.error(&context, None)),
         }
     }
     Err(AddressBookError::Permanent(format!("PROPFIND: more than {MAX_REDIRECTS} redirects")))
+}
+
+/// Refuses a discovered URL (principal, home set, or collection href) that
+/// `http` may not send credentials to, so discovery never silently drops
+/// `Authorization` (a misleading `Unauthorized`) or binds a collection over
+/// plain http.
+fn refuse_if_insecure(http: &HttpClient, url: &Url) -> Result<(), AddressBookError> {
+    if http.may_send_credentials(url) {
+        Ok(())
+    } else {
+        Err(AddressBookError::Permanent(format!(
+            "refusing insecure discovery URL at {}",
+            url.host_str().unwrap_or("an unknown host")
+        )))
+    }
 }
 
 /// Principal at the entry URL, falling back to `/.well-known/carddav` (RFC
@@ -403,6 +420,58 @@ mod tests {
             .respond_with(ResponseTemplate::new(302).insert_header("Location", format!("http://localhost:{port}/")))
             .mount(&server)
             .await;
+
+        let error = adapter(&server, ProviderQuirks::default()).discover().await.unwrap_err();
+
+        match error {
+            Error::AddressBook(AddressBookError::Permanent(message)) => assert!(message.contains("insecure"), "{message}"),
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn insecure_absolute_home_set_href_is_refused() {
+        // wiremock only serves plain http, so an https-policy account cannot
+        // be exercised directly. Instead this uses an absolute href to a
+        // different plain-http host ("localhost") than the entry host
+        // (127.0.0.1, from `server.uri()`), which `may_send_credentials`
+        // also refuses -- the same mechanism
+        // `insecure_redirect_to_another_host_is_refused`
+        // below exercises for the redirect path.
+        let server = MockServer::start().await;
+        let port = server.address().port();
+        Mock::given(method("PROPFIND"))
+            .and(path("/"))
+            .and(body_string_contains("current-user-principal"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(principal_body("/p/")))
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/p/"))
+            .and(body_string_contains("addressbook-home-set"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(home_set_body("/p/", &format!("http://localhost:{port}/home/"))))
+            .mount(&server)
+            .await;
+
+        let error = adapter(&server, ProviderQuirks::default()).discover().await.unwrap_err();
+
+        match error {
+            Error::AddressBook(AddressBookError::Permanent(message)) => assert!(message.contains("insecure"), "{message}"),
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests.iter().all(|r| r.url.path() != "/home/"), "must not query the insecure home set");
+    }
+
+    #[tokio::test]
+    async fn insecure_collection_href_is_refused() {
+        // Same technique as above: the home set resolves (relatively, so it
+        // stays on the entry host), but the address book collection itself
+        // is reported at an absolute href on a different plain-http host.
+        let server = MockServer::start().await;
+        let port = server.address().port();
+        mount_principal_and_home(&server).await;
+        mount_home(&server, "/h/", addressbook_entry(&format!("http://localhost:{port}/h/card/"), true)).await;
 
         let error = adapter(&server, ProviderQuirks::default()).discover().await.unwrap_err();
 

@@ -45,6 +45,7 @@ pub(crate) async fn changes_since(http: &HttpClient, bound: &Bound, token: Optio
             .sync_token
             .ok_or_else(|| AddressBookError::Permanent(format!("{context}: response without sync-token")))?;
         let mut truncated = false;
+        let mut skipped_without_etag = 0usize;
         for entry in page.responses {
             let path = canonical_path(&entry.href, &bound.collection_url)?;
             if bound.is_collection(&path) {
@@ -58,7 +59,13 @@ pub(crate) async fn changes_since(http: &HttpClient, bound: &Bound, token: Optio
                 merged.insert(Href::from(path), Change::Removed);
             } else if let Some(etag) = entry.props.etag {
                 merged.insert(Href::from(path), Change::Changed(ETag::from(etag)));
+            } else {
+                skipped_without_etag += 1;
+                tracing::debug!(path = %path, "sync-collection member without an ETag skipped");
             }
+        }
+        if skipped_without_etag > 0 {
+            tracing::warn!(count = skipped_without_etag, "sync-collection page had members without an ETag; skipped");
         }
         if !truncated {
             return Ok(Changes::Delta(into_change_set(merged, SyncToken::from(next))));
@@ -348,6 +355,31 @@ mod tests {
         let set = delta(adapter.changes_since(None).await.unwrap());
 
         assert_eq!(set.changed, [(Href::from("/home/card/a~b.vcf"), ETag::from("\"e\""))]);
+    }
+
+    fn no_etag(href: &str) -> String {
+        format!("<d:response><d:href>{href}</d:href><d:propstat><d:prop></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>")
+    }
+
+    #[tokio::test]
+    async fn member_without_etag_is_skipped_from_changeset() {
+        let server = MockServer::start().await;
+        let adapter = discovered(&server).await;
+        sync_report("")
+            .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(&format!(
+                "{}{}{}",
+                no_etag("/home/card/noetag.vcf"),
+                changed("/home/card/a.vcf", "\"ea\""),
+                token("t1")
+            ))))
+            .mount(&server)
+            .await;
+
+        let set = delta(adapter.changes_since(None).await.unwrap());
+
+        assert_eq!(set.changed, [(Href::from("/home/card/a.vcf"), ETag::from("\"ea\""))]);
+        assert!(!set.changed.iter().any(|(href, _)| href.as_str() == "/home/card/noetag.vcf"));
+        assert!(!set.removed.iter().any(|href| href.as_str() == "/home/card/noetag.vcf"));
     }
 
     #[tokio::test]

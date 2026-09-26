@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use cg_core::{AddressBookError, contact::Href};
 use reqwest::{
@@ -75,12 +78,21 @@ impl DavRequest {
 }
 
 /// A response of any status. Callers decide which statuses are success.
-#[derive(Debug)]
 pub(crate) struct DavResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     /// Raw body: may hold card data (PII). Never log it.
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for DavResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DavResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 impl DavResponse {
@@ -117,6 +129,12 @@ impl HttpClient {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Self, AddressBookError> {
+        if !matches!(entry_url.scheme(), "http" | "https") {
+            return Err(AddressBookError::Permanent(format!(
+                "entry URL scheme {:?} is not http or https",
+                entry_url.scheme()
+            )));
+        }
         let plain_http_host = if entry_url.scheme() == "https" {
             None
         } else {
@@ -298,6 +316,36 @@ mod tests {
         let icloud = client("https://contacts.icloud.com/", Duration::from_secs(5));
         assert!(icloud.may_send_credentials(&Url::parse("https://p42-contacts.icloud.com/").unwrap()));
         assert!(!icloud.may_send_credentials(&Url::parse("http://contacts.icloud.com/").unwrap()));
+    }
+
+    #[test]
+    fn non_http_scheme_entry_url_is_rejected() {
+        let result = HttpClient::new(
+            &Url::parse("ftp://example.com/").unwrap(),
+            "user".to_owned(),
+            SecretString::from("pass"),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+
+        match result {
+            Err(error) => assert!(matches!(error, AddressBookError::Permanent(_)), "{error:?}"),
+            Ok(_) => panic!("expected ftp:// entry URL to be rejected"),
+        }
+    }
+
+    #[test]
+    fn debug_omits_body_content() {
+        let response = DavResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: b"BEGIN:VCARD\r\nEMAIL:jane@example.com\r\nEND:VCARD\r\n".to_vec(),
+        };
+
+        let debug = format!("{response:?}");
+
+        assert!(!debug.contains("jane@example.com"), "body leaked into Debug: {debug}");
+        assert!(debug.contains("body_bytes"), "{debug}");
     }
 
     #[tokio::test]
