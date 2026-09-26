@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/cardigan"]
+members = ["crates/cardigan", "crates/carddav"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,6 +44,12 @@ sea-orm-migration = { version = "2.0.3", features = [
 ] }
 sqlx = "0.9.0"
 
+# CardDAV
+httpdate = "1.0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+secrecy = "0.10.3"
+url = "2.5.8"
+
 # CLI
 clap = { version = "4.6.7", features = ["cargo", "derive", "env"] }
 
@@ -79,6 +85,7 @@ tracing-subscriber = { version = "0.3.23", features = [
 
 # Testing
 insta = { version = "1.48.0", features = ["filters"] }
+wiremock = "0.6.5"
 
 # Serialization
 serde = { version = "1.0.229", features = ["derive"] }
