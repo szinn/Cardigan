@@ -1,0 +1,14 @@
+---
+source: crates/cardigan/src/report.rs
+expression: out
+---
+Dry run: nothing was written.
+BLOCKED: plan would delete 50 of 100 synced contacts on fastmail (limit 20); `cardigan sync` would write nothing.
+icloud→fastmail: create 0, update 0, delete 0, conflicts 0
+fastmail→icloud: create 0, update 0, delete 0, conflicts 0
+state only: adopt 0, refresh 0, forget 0
+
+Plan:
+
+Baseline report:
+in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0

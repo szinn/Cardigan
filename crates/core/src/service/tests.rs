@@ -964,3 +964,21 @@ async fn logs_carry_names_but_never_card_content() {
         assert!(!logs.contains(secret), "{secret} leaked into the logs:\n{logs}");
     }
 }
+
+#[tokio::test]
+async fn planned_counts_match_what_the_sync_applies() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put(href("/card/a.vcf"), vcard("a", "Alpha", ""));
+    h.fastmail.external_put(href("/dav/b.vcf"), vcard("b", "Bravo", ""));
+
+    let (cycle, blocked) = h.dry_run().await;
+    assert!(blocked.is_none());
+    let planned = CycleSummary::planned(&cycle.plan.ops);
+    assert_eq!((planned.to_fastmail.added, planned.to_icloud.added), (1, 1));
+
+    let CycleOutcome::Applied(applied) = h.sync().await else {
+        panic!("expected an applied cycle");
+    };
+    assert_eq!(planned.to_fastmail.added, applied.to_fastmail.added);
+    assert_eq!(planned.to_icloud.added, applied.to_icloud.added);
+}

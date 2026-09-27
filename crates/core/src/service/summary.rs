@@ -58,6 +58,17 @@ impl CycleSummary {
         }
     }
 
+    /// What a sync would count if every op in `ops` succeeded. Dry-run
+    /// prints this; `fetched` and the error counts stay zero.
+    #[must_use]
+    pub fn planned(ops: &[Op]) -> Self {
+        let mut summary = Self::default();
+        for op in ops {
+            summary.applied(op);
+        }
+        summary
+    }
+
     fn toward_mut(&mut self, to: Side) -> &mut DirectionCounts {
         match to {
             Side::ICloud => &mut self.to_icloud,

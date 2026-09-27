@@ -7,6 +7,7 @@ use cardigan::{
     config::Config,
     dump,
     logging::init_logging,
+    report::run_once,
     sync::{CycleRunner, NoopCycleRunner, run_daemon},
 };
 use cg_core::{
@@ -58,20 +59,19 @@ async fn run_engine(command: Commands) -> anyhow::Result<()> {
     let runner: Arc<dyn CycleRunner> = Arc::new(NoopCycleRunner);
 
     let result = match command {
-        Commands::Sync { once: true, reset } => runner
-            .run_cycle(CycleRequest { mode: CycleMode::Sync, reset })
-            .await
-            .map(drop)
-            .map_err(Into::into),
+        Commands::Sync { once: true, reset } => run_once(&*runner, CycleRequest { mode: CycleMode::Sync, reset }, &mut io::stdout()).await,
         Commands::Sync { once: false, reset } => run_daemon(runner, config.poll_interval, reset).await,
-        Commands::DryRun { reset } => runner
-            .run_cycle(CycleRequest {
-                mode: CycleMode::DryRun,
-                reset,
-            })
+        Commands::DryRun { reset } => {
+            run_once(
+                &*runner,
+                CycleRequest {
+                    mode: CycleMode::DryRun,
+                    reset,
+                },
+                &mut io::stdout(),
+            )
             .await
-            .map(drop)
-            .map_err(Into::into),
+        }
         Commands::Dump { .. } => unreachable!("dump is dispatched before the engine starts"),
     };
 
