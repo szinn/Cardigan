@@ -79,8 +79,16 @@ pub struct BaselineReport {
     pub skipped: Vec<Skip>,
     pub copies: Vec<ReportCopy>,
     pub unreadable: Vec<(Side, Href)>,
+    /// Cards CG-6 held instead of syncing: `Diagnostic::DuplicateUid` and
+    /// `Diagnostic::UidChanged` entries, by side and UID (M2). Never appear
+    /// in any op, so without this the user would have no way to learn a
+    /// card isn't syncing.
+    pub held: Vec<Diagnostic>,
     /// Fastmail-only groups being copied that list a UID pairing replaced
-    /// (Decision 7: fixed by hand in v1).
+    /// (Decision 7: fixed by hand in v1). A group here may also legitimately
+    /// appear under `copies` — this list only flags which of those copies
+    /// need a by-hand membership fix; membership on both sides stays stale
+    /// until CG-14 rewrites it.
     pub groups_with_reuid_members: Vec<ReportCopy>,
 }
 
@@ -138,6 +146,11 @@ impl BaselineReport {
                 _ => None,
             })
             .collect();
+        report.held = diagnostics
+            .iter()
+            .filter(|d| matches!(d, Diagnostic::DuplicateUid { .. } | Diagnostic::UidChanged { .. }))
+            .cloned()
+            .collect();
         report
     }
 }
@@ -176,9 +189,15 @@ impl fmt::Display for BaselineReport {
                 writeln!(f, "  {side} {href}")?;
             }
         }
+        if !self.held.is_empty() {
+            writeln!(f, "Held (not synced):")?;
+            for diagnostic in &self.held {
+                writeln!(f, "  {diagnostic}")?;
+            }
+        }
         section(
             f,
-            "Groups listing re-UID'd members (fix their membership by hand):",
+            "Groups listing re-UID'd members (membership stale until CG-14):",
             &self.groups_with_reuid_members,
         )
     }
@@ -193,4 +212,54 @@ fn section<T: fmt::Display>(f: &mut fmt::Formatter<'_>, title: &str, lines: &[T]
         writeln!(f, "  {line}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contact::{ETag, VCardError};
+
+    #[test]
+    fn held_section_lists_duplicate_and_reuid_diagnostics() {
+        let diagnostics = vec![
+            Diagnostic::DuplicateUid {
+                side: Side::ICloud,
+                uid: Uid::from("u1"),
+                hrefs: vec![Href::from("/i/a.vcf"), Href::from("/i/b.vcf")],
+            },
+            Diagnostic::UidChanged {
+                side: Side::Fastmail,
+                href: Href::from("/f/u2.vcf"),
+                etag: ETag::from("f2"),
+                stored: Uid::from("u2"),
+                found: Uid::from("u3"),
+            },
+            Diagnostic::Unreadable {
+                side: Side::Fastmail,
+                href: Href::from("/f/bad.vcf"),
+                etag: ETag::from("b1"),
+                error: VCardError::MissingUid,
+            },
+        ];
+
+        let report = BaselineReport::build(&[], &[], &diagnostics);
+
+        assert_eq!(report.held.len(), 2);
+        insta::assert_snapshot!(report.to_string(), @r"
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+        Unreadable (their counterparts may be copied):
+          fastmail /f/bad.vcf
+        Held (not synced):
+          duplicate uid=u1 on icloud: /i/a.vcf, /i/b.vcf
+          uid changed on fastmail /f/u2.vcf@f2: u2 → u3
+        ");
+    }
+
+    #[test]
+    fn no_held_diagnostics_means_no_held_section() {
+        let report = BaselineReport::build(&[], &[], &[]);
+
+        assert_eq!(report.held, []);
+        assert!(!report.to_string().contains("Held"));
+    }
 }

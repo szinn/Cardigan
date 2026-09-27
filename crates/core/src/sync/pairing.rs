@@ -9,6 +9,11 @@ use crate::{
 /// A card pairing leaves alone this cycle: it may be the same person as a
 /// card on the other side, but not certainly. Re-evaluated every cycle; CG-8
 /// persists the latest set in `baseline_skips`.
+///
+/// CG-8 should log one `warn` per skip, naming only `identity` and `uid`
+/// (the report already lists every skip; this is for operators watching the
+/// log). This applies to every kind of skip below, including the nameless
+/// email/phone match (2026-09-27 decision).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skip {
     pub side: Side,
@@ -20,7 +25,11 @@ pub struct Skip {
     /// possible matches (the card's own, or its only match's).
     pub candidate_count: u32,
     pub identity: DisplayIdentity,
-    /// The other side's unsynced cards with the same name.
+    /// The other side's unsynced cards the count came from: same-name
+    /// candidates for a pass-3 skip, (I1) the pass-2 content matches that
+    /// stayed unpaired for a card pass 2 refused as ambiguous, or (2026-09-27
+    /// decision) the other nameless cards a nameless card shares an email or
+    /// phone with.
     pub candidates: Vec<DisplayIdentity>,
 }
 
@@ -41,6 +50,7 @@ pub fn pair(unsynced: &Unsynced, winner: ConflictWinner) -> Paired {
         fastmail: unsynced.fastmail.iter().collect(),
         winner,
         ops: Vec::new(),
+        pass2: Pass2Candidates::default(),
     };
     pairing.by_uid();
     pairing.by_content();
@@ -50,10 +60,9 @@ pub fn pair(unsynced: &Unsynced, winner: ConflictWinner) -> Paired {
         ops: pairing.ops,
         skips: Vec::new(),
     };
-    let settled =
-        settle_side(Side::ICloud, &pairing.icloud, &pairing.fastmail)
-            .into_iter()
-            .chain(settle_side(Side::Fastmail, &pairing.fastmail, &pairing.icloud));
+    let settled = settle_side(Side::ICloud, &pairing.icloud, &pairing.fastmail, &pairing.pass2.icloud)
+        .into_iter()
+        .chain(settle_side(Side::Fastmail, &pairing.fastmail, &pairing.icloud, &pairing.pass2.fastmail));
     for outcome in settled {
         match outcome {
             Settled::Copy(op) => paired.ops.push(*op),
@@ -63,9 +72,22 @@ pub fn pair(unsynced: &Unsynced, winner: ConflictWinner) -> Paired {
     paired
 }
 
+/// One card's fate after the three passes: copied to the other side under
+/// its own UID, or left as an ambiguous `Skip`.
 enum Settled {
     Copy(Box<Op>),
     Skip(Skip),
+}
+
+/// Pass-2 (content) candidate lists for cards that stayed unpaired: keyed by
+/// the card's own UID, each entry is `(candidate_count, candidates)` using
+/// the same counting convention as pass 3 (I1). Consulted by `settle_side`
+/// so a card pass 2 refused as ambiguous is skipped, never copied, even when
+/// it has no usable name for pass 3's name-collision check.
+#[derive(Debug, Clone, Default)]
+struct Pass2Candidates {
+    icloud: HashMap<Uid, (u32, Vec<DisplayIdentity>)>,
+    fastmail: HashMap<Uid, (u32, Vec<DisplayIdentity>)>,
 }
 
 /// The cards still unpaired on each side, and the ops decided so far.
@@ -74,12 +96,25 @@ struct Pairing<'a> {
     fastmail: Vec<&'a UnsyncedCard>,
     winner: ConflictWinner,
     ops: Vec<Op>,
+    pass2: Pass2Candidates,
 }
 
 impl Pairing<'_> {
-    /// Pass 1: the same UID on both sides.
+    /// Pass 1: the same UID on both sides. Duplicate UIDs are held before
+    /// they ever reach `Unsynced` (CG-6), so a UID never repeats within a
+    /// side and a `HashMap` keyed by UID is safe here.
     fn by_uid(&mut self) {
         let fastmail: HashMap<&Uid, usize> = self.fastmail.iter().enumerate().map(|(f, c)| (c.card.uid(), f)).collect();
+        debug_assert_eq!(
+            fastmail.len(),
+            self.fastmail.len(),
+            "duplicate UID reached pairing on fastmail (CG-6 should hold it)"
+        );
+        debug_assert_eq!(
+            self.icloud.iter().map(|c| c.card.uid()).collect::<HashSet<_>>().len(),
+            self.icloud.len(),
+            "duplicate UID reached pairing on icloud (CG-6 should hold it)"
+        );
         let pairs: Vec<(usize, usize)> = self
             .icloud
             .iter()
@@ -137,11 +172,38 @@ impl Pairing<'_> {
             .map(|i| buckets.get(&i.card.canonical_hash(without_uid)).cloned().unwrap_or_default())
             .collect();
         let pairs = mutual_pairs(&candidates, self.fastmail.len());
+        // I1: a card with a pass-2 candidate that stays unpaired (refused as
+        // not mutual) must become a skip, never a copy, however settle_side
+        // would otherwise classify it — nameless cards included. Recorded
+        // before removing the pairs, over the cards pass 2 actually saw.
+        self.record_pass2_leftovers(&candidates, &pairs);
         for &(i, f) in &pairs {
             let op = Self::content_pair(self.icloud[i], self.fastmail[f]);
             self.ops.push(op);
         }
         self.remove(&pairs);
+    }
+
+    fn record_pass2_leftovers(&mut self, candidates: &[Vec<usize>], pairs: &[(usize, usize)]) {
+        let reverse = invert(candidates, self.fastmail.len());
+        let paired_icloud: HashSet<usize> = pairs.iter().map(|&(i, _)| i).collect();
+        let paired_fastmail: HashSet<usize> = pairs.iter().map(|&(_, f)| f).collect();
+        for (i, list) in candidates.iter().enumerate() {
+            if list.is_empty() || paired_icloud.contains(&i) {
+                continue;
+            }
+            let count = candidate_count(list, &reverse);
+            let identities = list.iter().map(|&f| self.fastmail[f].card.display_identity()).collect();
+            self.pass2.icloud.insert(self.icloud[i].card.uid().clone(), (count, identities));
+        }
+        for (f, list) in reverse.iter().enumerate() {
+            if list.is_empty() || paired_fastmail.contains(&f) {
+                continue;
+            }
+            let count = candidate_count(list, candidates);
+            let identities = list.iter().map(|&i| self.icloud[i].card.display_identity()).collect();
+            self.pass2.fastmail.insert(self.fastmail[f].card.uid().clone(), (count, identities));
+        }
     }
 
     /// Pass 3: the identity heuristic, unique both ways.
@@ -239,43 +301,129 @@ fn mutual_pairs(candidates: &[Vec<usize>], fastmail_len: usize) -> Vec<(usize, u
         .collect()
 }
 
-/// After the passes (Decision 6): unique → copy; ambiguous → skip.
-fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard]) -> Vec<Settled> {
+/// After the passes (Decision 6): unique → copy; ambiguous → skip, checked
+/// in this order: `pass2` (I1) takes priority over everything else — a card
+/// pass 2 could not pair mutually is always a skip, even when it has no
+/// usable name; then a nameless card (2026-09-27 decision) is a skip when
+/// another nameless card on the other side shares an email or phone with it,
+/// and a copy otherwise; a named card falls back to the name-collision
+/// check.
+fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard], pass2: &HashMap<Uid, (u32, Vec<DisplayIdentity>)>) -> Vec<Settled> {
     let own = identity_candidates(cards, other);
     let reverse = identity_candidates(other, cards);
     let other_keys: Vec<MatchKeys> = other.iter().map(|c| c.card.match_keys()).collect();
     let other_names = name_buckets(&other_keys);
+    // 2026-09-27 decision: two nameless cards that share an email or phone
+    // are plausibly the same person, so neither is copied.
+    let nameless_own = nameless_candidates(cards, other);
+    let nameless_reverse = nameless_candidates(other, cards);
 
     cards
         .iter()
         .zip(&own)
-        .map(|(card, candidates)| {
+        .enumerate()
+        .map(|(index, (card, candidates))| {
+            let uid = card.card.uid();
+            if let Some((count, pass2_candidates)) = pass2.get(uid) {
+                return Settled::Skip(Skip {
+                    side,
+                    resource: card.resource.clone(),
+                    uid: uid.clone(),
+                    content_hash: card.card.canonical_hash(SYNC_HASH),
+                    candidate_count: *count,
+                    identity: card.card.display_identity(),
+                    candidates: pass2_candidates.clone(),
+                });
+            }
             let keys = card.card.match_keys();
+            if keys.name_key().is_none() {
+                let matches = &nameless_own[index];
+                if matches.is_empty() {
+                    return Settled::Copy(Box::new(Op::Create {
+                        uid: uid.clone(),
+                        to: side.other(),
+                        source: card.resource.clone(),
+                        synced: SyncedCard::for_push(&card.card, None),
+                    }));
+                }
+                return Settled::Skip(Skip {
+                    side,
+                    resource: card.resource.clone(),
+                    uid: uid.clone(),
+                    content_hash: card.card.canonical_hash(SYNC_HASH),
+                    // Same contested-singleton convention as pass 2/3.
+                    candidate_count: candidate_count(matches, &nameless_reverse),
+                    identity: card.card.display_identity(),
+                    candidates: matches.iter().map(|&o| other[o].card.display_identity()).collect(),
+                });
+            }
             let same_name = keys.name_key().and_then(|name| other_names.get(name)).map_or(&[][..], Vec::as_slice);
             if same_name.is_empty() {
                 return Settled::Copy(Box::new(Op::Create {
-                    uid: card.card.uid().clone(),
+                    uid: uid.clone(),
                     to: side.other(),
                     source: card.resource.clone(),
                     synced: SyncedCard::for_push(&card.card, None),
                 }));
             }
-            let count = match candidates.as_slice() {
-                // Its only match is contested: report the match's count.
-                [only] => reverse[*only].len(),
-                list => list.len(),
-            };
             Settled::Skip(Skip {
                 side,
                 resource: card.resource.clone(),
-                uid: card.card.uid().clone(),
+                uid: uid.clone(),
                 content_hash: card.card.canonical_hash(SYNC_HASH),
-                candidate_count: u32::try_from(count).unwrap_or(u32::MAX),
+                candidate_count: candidate_count(candidates, &reverse),
                 identity: card.card.display_identity(),
                 candidates: same_name.iter().map(|&o| other[o].card.display_identity()).collect(),
             })
         })
         .collect()
+}
+
+/// For each card in `from` with no usable name, the `to` cards that also
+/// have no usable name and share an email or phone with it (`from` cards
+/// with a name get an empty list here; pass 3's `identity_candidates`
+/// already covers them). 2026-09-27 decision: nameless cards this plausibly
+/// identifies as the same person are skipped, never both copied.
+fn nameless_candidates(from: &[&UnsyncedCard], to: &[&UnsyncedCard]) -> Vec<Vec<usize>> {
+    let to_keys: Vec<MatchKeys> = to.iter().map(|c| c.card.match_keys()).collect();
+    from.iter()
+        .map(|c| {
+            let keys = c.card.match_keys();
+            if keys.name_key().is_some() {
+                return Vec::new();
+            }
+            to_keys
+                .iter()
+                .enumerate()
+                .filter(|(_, other_keys)| other_keys.name_key().is_none() && keys.shares_contact_point(other_keys))
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .collect()
+}
+
+/// A card's candidate count under the pass 2/3 convention: no match is 0;
+/// several matches report their own count; a single match reports that
+/// match's own claimant count instead (a singleton with exactly one mutual
+/// claimant would already have been paired, so this only fires when it's
+/// contested).
+fn candidate_count(list: &[usize], reverse: &[Vec<usize>]) -> u32 {
+    let count = match list {
+        [only] => reverse[*only].len(),
+        list => list.len(),
+    };
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Inverts a `from → [to]` candidate map into `to → [from]`.
+fn invert(candidates: &[Vec<usize>], to_len: usize) -> Vec<Vec<usize>> {
+    let mut inverted = vec![Vec::new(); to_len];
+    for (from, list) in candidates.iter().enumerate() {
+        for &to in list {
+            inverted[to].push(from);
+        }
+    }
+    inverted
 }
 
 /// For each card in `from`, the `to` cards it matches by identity.
@@ -606,6 +754,50 @@ mod tests {
     }
 
     #[test]
+    fn nameless_cards_sharing_an_email_are_skipped_not_copied() {
+        // 2026-09-27 decision: nameless cards on both sides that share an
+        // email are plausibly the same person, so neither is copied.
+        let icloud = card_with("ic-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:one\r\n");
+        let fastmail = card_with("fm-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:two\r\n");
+
+        let paired = run(vec![icloud], vec![fastmail], Side::ICloud);
+
+        assert!(paired.ops.is_empty(), "{}", render(&paired.ops));
+        let counts: Vec<(Side, &str, u32)> = paired.skips.iter().map(|s| (s.side, s.uid.as_str(), s.candidate_count)).collect();
+        assert_eq!(counts, [(Side::ICloud, "ic-1", 1), (Side::Fastmail, "fm-1", 1)]);
+    }
+
+    #[test]
+    fn nameless_cards_sharing_a_phone_are_skipped_not_copied() {
+        let icloud = card_with("ic-1", "+15550100100", "TEL:+15550100100\r\nNOTE:one\r\n");
+        let fastmail = card_with("fm-1", "+15550100100", "TEL:+15550100100\r\nNOTE:two\r\n");
+
+        let paired = run(vec![icloud], vec![fastmail], Side::ICloud);
+
+        assert!(paired.ops.is_empty(), "{}", render(&paired.ops));
+        let counts: Vec<(Side, &str, u32)> = paired.skips.iter().map(|s| (s.side, s.uid.as_str(), s.candidate_count)).collect();
+        assert_eq!(counts, [(Side::ICloud, "ic-1", 1), (Side::Fastmail, "fm-1", 1)]);
+    }
+
+    #[test]
+    fn nameless_collision_skip_appears_in_the_report_without_pii() {
+        let icloud = card_with("ic-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:one\r\n");
+        let fastmail = card_with("fm-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:two\r\n");
+
+        let paired = run(vec![icloud], vec![fastmail], Side::ICloud);
+        let report = crate::sync::BaselineReport::build(&paired.ops, &paired.skips, &[]);
+        let rendered = report.to_string();
+
+        assert!(!rendered.contains('@'), "PII leaked into the report: {rendered}");
+        insta::assert_snapshot!(rendered, @r"
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 2, to copy: 0
+        Skipped, never guessed (edit either card to resolve):
+          icloud <no name>: 1 candidates: <no name>
+          fastmail <no name>: 1 candidates: <no name>
+        ");
+    }
+
+    #[test]
     fn copies_carry_no_photo() {
         let paired = run(vec![card_with("ic-1", "Ann Lee", URI_PHOTO)], vec![], Side::ICloud);
 
@@ -614,6 +806,55 @@ mod tests {
             [Op::Create { synced, .. }] => assert_eq!(synced.body(), &card("ic-1", "Ann Lee")),
             other => panic!("expected one create, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nameless_pass2_candidates_that_stay_unpaired_are_skipped() {
+        // I1: two identical nameless iCloud cards vs one identical Fastmail
+        // card. Pass 2 refuses both (not mutual); pass 3 ignores nameless
+        // cards. Every one of the three must become a skip, never a copy.
+        let body = "NOTE:x\r\n";
+        let paired = run(
+            vec![card_with("ic-1", "jane@example.com", body), card_with("ic-2", "jane@example.com", body)],
+            vec![card_with("fm-1", "jane@example.com", body)],
+            Side::ICloud,
+        );
+
+        assert!(paired.ops.is_empty(), "{}", render(&paired.ops));
+        let counts: Vec<(Side, &str, u32)> = paired.skips.iter().map(|s| (s.side, s.uid.as_str(), s.candidate_count)).collect();
+        assert_eq!(counts, [(Side::ICloud, "ic-1", 2), (Side::ICloud, "ic-2", 2), (Side::Fastmail, "fm-1", 2)]);
+    }
+
+    #[test]
+    fn nameless_pass2_candidates_mirrored_on_fastmail_side() {
+        // Mirrored: one iCloud card vs two identical nameless Fastmail cards.
+        let body = "NOTE:x\r\n";
+        let paired = run(
+            vec![card_with("ic-1", "jane@example.com", body)],
+            vec![card_with("fm-1", "jane@example.com", body), card_with("fm-2", "jane@example.com", body)],
+            Side::ICloud,
+        );
+
+        assert!(paired.ops.is_empty(), "{}", render(&paired.ops));
+        let counts: Vec<(Side, &str, u32)> = paired.skips.iter().map(|s| (s.side, s.uid.as_str(), s.candidate_count)).collect();
+        assert_eq!(counts, [(Side::ICloud, "ic-1", 2), (Side::Fastmail, "fm-1", 2), (Side::Fastmail, "fm-2", 2)]);
+    }
+
+    #[test]
+    fn identity_pair_leaves_the_other_side_free_for_a_same_name_leftover() {
+        // Spec rule pinned: cards paired this cycle never count as
+        // collisions, so a same-name leftover on one side is still copied.
+        let icloud1 = card_with("ic-1", "Jane Doe", &format!("{JANE}NOTE:one\r\n"));
+        let fastmail1 = card_with("fm-1", "Jane Doe", &format!("{JANE}NOTE:two\r\n"));
+        let icloud2 = card_with("ic-2", "Jane Doe", "EMAIL:jane2@example.com\r\n");
+
+        let paired = run(vec![icloud1, icloud2], vec![fastmail1], Side::ICloud);
+
+        assert_eq!(
+            render(&paired.ops),
+            "recreate(identity) uid=ic-1 fastmail /f/fm-1.vcf@f-fm-1 was fm-1 icloud wins\ncreate fastmail uid=ic-2 from=/i/ic-2.vcf"
+        );
+        assert_eq!(paired.skips, []);
     }
 
     #[test]

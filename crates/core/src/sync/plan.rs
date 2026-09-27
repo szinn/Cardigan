@@ -148,14 +148,30 @@ pub enum Op {
         synced: SyncedCard,
     },
     /// Pairing passes 2 and 3: the Fastmail card takes the iCloud card's UID.
-    /// CG-8 runs these steps in order; a crash between any two converges on
-    /// the next cycle's pairing instead of duplicating:
+    /// CG-8 runs these steps in order; a crash between most pairs of steps
+    /// converges on the next cycle's pairing instead of duplicating:
     /// 1. record `conflict` in the conflict history (pass 3 only);
     /// 2. PUT `put_icloud` over `icloud` (`If-Match`), when set (pass 3,
     ///    Fastmail wins);
     /// 3. DELETE `old_fastmail` (`If-Match`);
     /// 4. PUT `create_fastmail` to Fastmail at a new href (`If-None-Match: *`);
     /// 5. add the state row for `uid` with `synced`.
+    ///
+    /// A crash between step 1 and step 2 re-records the same pass-3 conflict
+    /// on the next cycle, since pairing re-evaluates from scratch: CG-8
+    /// should dedupe identical conflict rows, or accept the duplicate (M1).
+    ///
+    /// A crash between step 3 and step 4 is not self-healing: the old
+    /// Fastmail card is already gone, and nothing in pure `sync` remembers
+    /// its bytes, so the next cycle's pairing can only copy the iCloud card
+    /// under a new UID — losing `create_fastmail`'s own content, photo
+    /// included, exactly what pass 2/3 exist to keep (I2). Pure `core`
+    /// cannot persist, so recovering from this gap is CG-8's obligation:
+    /// before step 3, durably record `create_fastmail` (the Fastmail card's
+    /// own bytes, under the new UID) for every pass; then, on the next
+    /// cycle, if that record is still pending (its old card gone, its new
+    /// card not yet present), create it from the record instead of letting
+    /// pairing copy the iCloud card.
     Recreate {
         uid: Uid,
         pass: PairPass,

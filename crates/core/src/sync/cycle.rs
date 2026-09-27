@@ -166,7 +166,7 @@ mod tests {
           Family uid=fm-g → icloud
         Unreadable (their counterparts may be copied):
           fastmail /f/bad.vcf
-        Groups listing re-UID'd members (fix their membership by hand):
+        Groups listing re-UID'd members (membership stale until CG-14):
           Family uid=fm-g → icloud
         ");
         assert_eq!(planned.skips.len(), 2);
@@ -184,7 +184,12 @@ mod tests {
 
     #[test]
     fn resume_after_recreate_delete_copies_the_icloud_card() {
-        // Crash between DELETE of fm-3 and its recreate: only iCloud holds it.
+        // Crash between DELETE of fm-3 and its recreate: only iCloud holds
+        // it. Pure `sync` has no memory of the deleted Fastmail card's own
+        // bytes, so pairing copies the iCloud card instead. This is the
+        // fallback CG-8 hits only when its durably recorded
+        // `create_fastmail` (Op::Recreate's doc, I2) is missing; normally
+        // CG-8 replays that record and this path never runs.
         let icloud = side("i", &[card_with("ic-3", "Ann Lee", "EMAIL:ann@example.com\r\n")]);
 
         let planned = cycle(&icloud, &Snapshot::new(), &[], Side::ICloud);

@@ -21,7 +21,10 @@ pub struct MassDeletion {
 /// Checks each side's deletion count against
 /// `max(DELETE_FLOOR, synced_contacts * DELETE_PERCENT / 100)`. A side's count
 /// is its `Delete` ops plus every `Forget` (gone on both sides, so it counts
-/// toward both tallies).
+/// toward both tallies). `Op::Recreate`'s own DELETE of the old Fastmail card
+/// is intentionally not counted here (M3): every baseline pair recreates the
+/// Fastmail card (pass 2 or pass 3), so counting those would trip the guard
+/// on an ordinary baseline rather than a real mass deletion.
 pub fn check_deletions(plan: &Plan, synced_contacts: usize) -> Result<(), MassDeletion> {
     let limit = DELETE_FLOOR.max(synced_contacts * DELETE_PERCENT / 100);
     for side in [Side::ICloud, Side::Fastmail] {

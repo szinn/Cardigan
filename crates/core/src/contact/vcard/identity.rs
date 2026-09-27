@@ -63,6 +63,14 @@ impl MatchKeys {
         !self.emails.is_empty() || !self.phones.is_empty()
     }
 
+    /// A shared email or phone, ignoring name entirely. Used to match two
+    /// nameless cards (2026-09-27 user decision): `is_match` never applies
+    /// to them since neither has a name, but they may still be the same
+    /// person.
+    pub fn shares_contact_point(&self, other: &Self) -> bool {
+        !self.emails.is_disjoint(&other.emails) || !self.phones.is_disjoint(&other.phones)
+    }
+
     /// The normalized full name the heuristic compares (lower-cased,
     /// whitespace collapsed), or `None` when the card has no usable name.
     /// A name may be logged; the other keys may not.
@@ -235,6 +243,22 @@ mod tests {
         assert!(!a.is_match(&b));
         let no_contact = card(&["FN:Jane Doe", "ORG:Acme"]).match_keys();
         assert!(!a.is_match(&no_contact));
+    }
+
+    #[test]
+    fn shares_contact_point_ignores_name() {
+        let a = card(&["FN:jane@example.com", "EMAIL:jane@example.com"]).match_keys();
+        let b = card(&["FN:jane@example.com", "EMAIL:JANE@Example.com"]).match_keys();
+        assert!(a.shares_contact_point(&b));
+        assert!(!a.is_match(&b), "nameless cards never satisfy is_match");
+
+        let c = card(&["FN:+15550100100", "TEL:+1 555 0100"]).match_keys();
+        let d = card(&["FN:+15550100100", "TEL:+1 (555) 0100"]).match_keys();
+        assert!(c.shares_contact_point(&d));
+
+        let no_overlap = card(&["FN:jane@example.com", "EMAIL:other@example.com"]).match_keys();
+        assert!(!a.shares_contact_point(&no_overlap));
+        assert!(!card(&[]).match_keys().shares_contact_point(&card(&[]).match_keys()));
     }
 
     #[test]
