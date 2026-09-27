@@ -171,6 +171,26 @@ where
     }
 }
 
+/// A valid `Config` for other modules' tests.
+#[cfg(test)]
+pub(crate) fn test_config(icloud_url: &str, fastmail_url: &str) -> Config {
+    Config {
+        icloud: EndpointConfig {
+            url: icloud_url.to_owned(),
+            username: "jane@icloud.com".to_owned(),
+            password: Secret::new("icloud-secret-pw"),
+        },
+        fastmail: EndpointConfig {
+            url: fastmail_url.to_owned(),
+            username: "jane@fastmail.com".to_owned(),
+            password: Secret::new("fastmail-secret-pw"),
+        },
+        poll_interval: Duration::from_secs(120),
+        database_path: PathBuf::from("/nonexistent"),
+        conflict_winner: ConflictWinner::ICloud,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

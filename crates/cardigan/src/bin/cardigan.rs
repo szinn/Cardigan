@@ -3,20 +3,15 @@ use std::{io, sync::Arc};
 use anyhow::Context;
 use cardigan::{
     carddav::build_address_book,
-    commands::{CommandLine, Commands, Target},
+    commands::{CommandLine, Commands, Engine, Target},
     config::Config,
     dump,
+    engine::build_sync_service,
     logging::init_logging,
     report::run_once,
-    sync::{CycleRunner, NoopCycleRunner, run_daemon},
+    sync::{CycleRunner, run_daemon},
 };
-use cg_core::{
-    ExternalServicesBuilder,
-    contact::Side,
-    create_services,
-    repository::RepositoryService,
-    service::{CycleMode, CycleRequest},
-};
+use cg_core::{ExternalServicesBuilder, contact::Side, create_services, repository::RepositoryService};
 use cg_database::{create_repository_service, open_database};
 
 #[global_allocator]
@@ -55,24 +50,16 @@ async fn run_engine(command: Commands) -> anyhow::Result<()> {
         .context("ExternalServices missing required field")?;
     let _core_services = create_services(external).context("Couldn't create core services")?;
 
-    // CG-9 replaces this with the core SyncService.
-    let runner: Arc<dyn CycleRunner> = Arc::new(NoopCycleRunner);
-
-    let result = match command {
-        Commands::Sync { once: true, reset } => run_once(&*runner, CycleRequest { mode: CycleMode::Sync, reset }, &mut io::stdout()).await,
-        Commands::Sync { once: false, reset } => run_daemon(runner, config.poll_interval, reset).await,
-        Commands::DryRun { reset } => {
-            run_once(
-                &*runner,
-                CycleRequest {
-                    mode: CycleMode::DryRun,
-                    reset,
-                },
-                &mut io::stdout(),
-            )
-            .await
+    let result = match build_sync_service(&config, repository_service.clone()) {
+        Ok(service) => {
+            let runner: Arc<dyn CycleRunner> = Arc::new(service);
+            match command.engine() {
+                Some(Engine::Daemon { reset }) => run_daemon(runner, config.poll_interval, reset).await,
+                Some(Engine::Once(request)) => run_once(&*runner, request, &mut io::stdout()).await,
+                None => unreachable!("dump is dispatched before the engine starts"),
+            }
         }
-        Commands::Dump { .. } => unreachable!("dump is dispatched before the engine starts"),
+        Err(e) => Err(e),
     };
 
     match repository_service.repository().close().await.context("Couldn't close database") {

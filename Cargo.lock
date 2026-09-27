@@ -493,6 +493,7 @@ dependencies = [
  "cg-carddav",
  "cg-core",
  "cg-database",
+ "chrono",
  "clap",
  "config",
  "insta",

@@ -85,9 +85,16 @@ impl fmt::Display for Planned<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
-    use cg_core::{AddressBookError, Error, contact::Side};
+    use cg_core::{
+        AddressBookError, Error,
+        addressbook::Collection,
+        contact::Side,
+        service::{SyncConfig, SyncService, SystemClock},
+        test_support::{InMemoryAddressBook, InMemoryState},
+    };
+    use chrono::TimeDelta;
 
     use super::*;
 
@@ -218,5 +225,46 @@ mod tests {
             blocked: None,
         }));
         run_once(&stub, DRY_RUN, &mut BrokenPipe).await.unwrap();
+    }
+
+    fn book(url: &str, host: &str) -> Arc<InMemoryAddressBook> {
+        Arc::new(InMemoryAddressBook::new(Collection {
+            addressbook_url: url.to_owned(),
+            discovered_host: host.to_owned(),
+            supports_sync_collection: true,
+        }))
+    }
+
+    /// Synthetic, PII-free card.
+    fn vcard(uid: &str, name: &str) -> String {
+        format!("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:{uid}\r\nFN:{name}\r\nEND:VCARD\r\n")
+    }
+
+    /// A first-run dry run through the real SyncService: one card only on
+    /// iCloud, one only on Fastmail, one identical on both.
+    #[tokio::test]
+    async fn baseline_dry_run_output() {
+        let icloud = book("https://icloud.test/card/", "icloud.test");
+        let fastmail = book("https://fastmail.test/dav/", "fastmail.test");
+        icloud.external_put("/card/a.vcf", vcard("a", "Alpha"));
+        icloud.external_put("/card/b.vcf", vcard("b", "Bravo"));
+        fastmail.external_put("/dav/b.vcf", vcard("b", "Bravo"));
+        fastmail.external_put("/dav/c.vcf", vcard("c", "Charlie"));
+        let service = SyncService::new(
+            icloud.clone(),
+            fastmail.clone(),
+            InMemoryState::new().repository_service(),
+            SyncConfig {
+                winner: Side::ICloud,
+                poll_interval: TimeDelta::seconds(120),
+            },
+            Arc::new(SystemClock),
+        );
+
+        let mut out = Vec::new();
+        run_once(&service, DRY_RUN, &mut out).await.unwrap();
+
+        assert!(icloud.writes().is_empty() && fastmail.writes().is_empty(), "dry-run must not write");
+        insta::assert_snapshot!(String::from_utf8(out).unwrap());
     }
 }

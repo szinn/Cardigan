@@ -1,4 +1,7 @@
-use cg_core::contact::Side;
+use cg_core::{
+    contact::Side,
+    service::{CycleMode, CycleRequest},
+};
 
 #[derive(Debug, clap::Parser)]
 #[command(
@@ -60,6 +63,32 @@ impl From<Target> for Side {
     }
 }
 
+/// What an engine command runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    /// `sync`: the poll loop until SIGINT/SIGTERM.
+    Daemon { reset: bool },
+    /// `sync --once` and `dry-run`: one cycle.
+    Once(CycleRequest),
+}
+
+impl Commands {
+    /// The engine run for this command; `None` for `dump`, which never
+    /// starts the engine.
+    #[must_use]
+    pub fn engine(&self) -> Option<Engine> {
+        match *self {
+            Self::Sync { once: false, reset } => Some(Engine::Daemon { reset }),
+            Self::Sync { once: true, reset } => Some(Engine::Once(CycleRequest { mode: CycleMode::Sync, reset })),
+            Self::DryRun { reset } => Some(Engine::Once(CycleRequest {
+                mode: CycleMode::DryRun,
+                reset,
+            })),
+            Self::Dump { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser, error::ErrorKind};
@@ -68,6 +97,50 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Commands, clap::Error> {
         CommandLine::try_parse_from(std::iter::once("cardigan").chain(args.iter().copied())).map(|cli| cli.command)
+    }
+
+    fn engine(args: &[&str]) -> Option<Engine> {
+        parse(args).unwrap().engine()
+    }
+
+    #[test]
+    fn dry_run_never_maps_to_a_sync_cycle() {
+        assert_eq!(
+            engine(&["dry-run"]),
+            Some(Engine::Once(CycleRequest {
+                mode: CycleMode::DryRun,
+                reset: false
+            }))
+        );
+        assert_eq!(
+            engine(&["dry-run", "--reset"]),
+            Some(Engine::Once(CycleRequest {
+                mode: CycleMode::DryRun,
+                reset: true
+            }))
+        );
+    }
+
+    #[test]
+    fn sync_once_maps_to_one_sync_cycle() {
+        assert_eq!(
+            engine(&["sync", "--once", "--reset"]),
+            Some(Engine::Once(CycleRequest {
+                mode: CycleMode::Sync,
+                reset: true
+            }))
+        );
+    }
+
+    #[test]
+    fn sync_maps_to_the_daemon() {
+        assert_eq!(engine(&["sync"]), Some(Engine::Daemon { reset: false }));
+        assert_eq!(engine(&["sync", "--reset"]), Some(Engine::Daemon { reset: true }));
+    }
+
+    #[test]
+    fn dump_is_not_an_engine_command() {
+        assert_eq!(engine(&["dump", "icloud"]), None);
     }
 
     #[test]

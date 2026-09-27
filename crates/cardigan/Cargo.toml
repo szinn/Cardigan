@@ -25,6 +25,7 @@ cg-database.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 mimalloc.workspace = true
 clap.workspace = true
 config.workspace = true

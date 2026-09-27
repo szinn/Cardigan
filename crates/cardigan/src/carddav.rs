@@ -26,28 +26,8 @@ pub fn build_address_book(side: Side, config: &Config) -> anyhow::Result<CardDav
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
-
     use super::*;
-    use crate::config::{EndpointConfig, Secret};
-
-    fn config(icloud_url: &str, fastmail_url: &str) -> Config {
-        Config {
-            icloud: EndpointConfig {
-                url: icloud_url.to_owned(),
-                username: "jane@icloud.com".to_owned(),
-                password: Secret::new("icloud-secret-pw"),
-            },
-            fastmail: EndpointConfig {
-                url: fastmail_url.to_owned(),
-                username: "jane@fastmail.com".to_owned(),
-                password: Secret::new("fastmail-secret-pw"),
-            },
-            poll_interval: Duration::from_secs(120),
-            database_path: PathBuf::from("/nonexistent"),
-            conflict_winner: Side::ICloud,
-        }
-    }
+    use crate::config::test_config as config;
 
     #[test]
     fn builds_both_sides_from_default_urls() {

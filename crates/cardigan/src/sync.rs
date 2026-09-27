@@ -1,14 +1,14 @@
 //! The sync daemon loop.
 //!
 //! The loop only schedules cycles; what a cycle does is behind [`CycleRunner`],
-//! which the core `SyncService` implements.
+//! which the core `SyncService` implements below.
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use cg_core::{
     AddressBookError, Error,
-    service::{CycleMode, CycleOutcome, CycleRequest},
+    service::{CycleMode, CycleOutcome, CycleRequest, SyncService},
 };
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_graceful_shutdown::{IntoSubsystem, SubsystemBuilder, SubsystemHandle, Toplevel};
@@ -25,14 +25,10 @@ pub trait CycleRunner: Send + Sync {
     async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error>;
 }
 
-/// Placeholder runner until the binary wires in the `SyncService`.
-pub struct NoopCycleRunner;
-
 #[async_trait::async_trait]
-impl CycleRunner for NoopCycleRunner {
+impl CycleRunner for SyncService {
     async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error> {
-        tracing::debug!(mode = ?request.mode, reset = request.reset, "Sync cycle (no-op)");
-        Ok(CycleOutcome::Idle)
+        Self::run_cycle(self, request).await
     }
 }
 
@@ -306,17 +302,5 @@ mod tests {
 
         let cycles: Vec<CycleRequest> = runner.requests.lock().unwrap().iter().map(|(_, r)| *r).collect();
         assert_eq!(cycles, vec![sync(false), sync(false)], "expected the immediate cycle plus one more tick");
-    }
-
-    #[tokio::test]
-    async fn noop_runner_is_idle() {
-        let outcome = NoopCycleRunner
-            .run_cycle(CycleRequest {
-                mode: CycleMode::DryRun,
-                reset: true,
-            })
-            .await
-            .unwrap();
-        assert!(matches!(outcome, CycleOutcome::Idle));
     }
 }
