@@ -18,12 +18,18 @@ pub struct MassDeletion {
     pub limit: usize,
 }
 
-/// Checks each side's `Delete` count against
-/// `max(DELETE_FLOOR, synced_contacts * DELETE_PERCENT / 100)`.
+/// Checks each side's deletion count against
+/// `max(DELETE_FLOOR, synced_contacts * DELETE_PERCENT / 100)`. A side's count
+/// is its `Delete` ops plus every `Forget` (gone on both sides, so it counts
+/// toward both tallies).
 pub fn check_deletions(plan: &Plan, synced_contacts: usize) -> Result<(), MassDeletion> {
     let limit = DELETE_FLOOR.max(synced_contacts * DELETE_PERCENT / 100);
     for side in [Side::ICloud, Side::Fastmail] {
-        let deletes = plan.ops.iter().filter(|op| matches!(op, Op::Delete { on, .. } if *on == side)).count();
+        let deletes = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Delete { on, .. } if *on == side) || matches!(op, Op::Forget { .. }))
+            .count();
         if deletes > limit {
             return Err(MassDeletion {
                 side,
@@ -87,6 +93,26 @@ mod tests {
     #[test]
     fn sides_are_counted_separately() {
         assert_eq!(check_deletions(&deletes(8, 8), 12), Ok(()));
+    }
+
+    #[test]
+    fn forgets_count_toward_both_sides() {
+        let forget = |i: usize| Op::Forget {
+            uid: Uid::from(format!("u{i}")),
+        };
+        let plan = Plan {
+            ops: (0..11).map(forget).collect(),
+            diagnostics: vec![],
+        };
+        assert_eq!(
+            check_deletions(&plan, 12),
+            Err(MassDeletion {
+                side: Side::ICloud,
+                deletes: 11,
+                contacts: 12,
+                limit: 10
+            })
+        );
     }
 
     #[test]

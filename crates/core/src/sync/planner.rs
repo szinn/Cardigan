@@ -45,8 +45,23 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
         // An uncertain side may be hiding this row's card at an href the
         // planner cannot attribute (unreadable or held): a `Deleted` status
         // there might be wrong, so emit no op rather than risk a wrong
-        // delete or resurrect (Review Focus 1).
-        if (icloud.uncertain && i.is_deleted()) || (fastmail.uncertain && f.is_deleted()) {
+        // delete or resurrect (Review Focus 1). Report the skip instead of
+        // silently dropping the row.
+        let icloud_deferred = icloud.uncertain && i.is_deleted();
+        let fastmail_deferred = fastmail.uncertain && f.is_deleted();
+        if icloud_deferred || fastmail_deferred {
+            if icloud_deferred {
+                diagnostics.push(Diagnostic::DeletionDeferred {
+                    side: Side::ICloud,
+                    uid: row.uid.clone(),
+                });
+            }
+            if fastmail_deferred {
+                diagnostics.push(Diagnostic::DeletionDeferred {
+                    side: Side::Fastmail,
+                    uid: row.uid.clone(),
+                });
+            }
             continue;
         }
         match decide(&baseline, i, f, input) {
@@ -56,11 +71,17 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
         }
     }
 
+    // A UID held on one side (duplicated, UID-changed, or unreadable at its
+    // synced href) must not reach pairing from the other side, or pairing
+    // would Create a copy of a card the planner is still holding here.
+    let icloud_unsynced = icloud.unsynced.into_iter().filter(|c| !fastmail.held.contains(c.card.uid())).collect();
+    let fastmail_unsynced = fastmail.unsynced.into_iter().filter(|c| !icloud.held.contains(c.card.uid())).collect();
+
     Planned {
         plan: Plan { ops, diagnostics },
         unsynced: Unsynced {
-            icloud: icloud.unsynced,
-            fastmail: fastmail.unsynced,
+            icloud: icloud_unsynced,
+            fastmail: fastmail_unsynced,
         },
     }
 }
@@ -79,15 +100,6 @@ impl Status<'_> {
     /// Whether this side has nothing at the row's tracked resource.
     fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted)
-    }
-
-    /// The resource a write to this side must target. Never called on
-    /// `Deleted`: `decide` handles that case first.
-    fn current(self) -> Resource {
-        match self {
-            Self::Unchanged(resource) | Self::Same(resource, _) | Self::Changed(resource, _) => resource,
-            Self::Deleted => unreachable!("decide matches Deleted before asking for a target"),
-        }
     }
 
     /// The new resource to record when the card was fetched but not changed.
@@ -182,16 +194,16 @@ fn decide(baseline: &Baseline<'_>, icloud: Status<'_>, fastmail: Status<'_>, inp
         }
         (Status::Changed(source, card), other) => Some(one_sided(uid, Side::Fastmail, source, card, other)),
         (other, Status::Changed(source, card)) => Some(one_sided(uid, Side::ICloud, source, card, other)),
-        (Status::Deleted, present) => Some(Ok(Op::Delete {
+        // `Changed` on either side is already matched above, so the only
+        // cases left here are `Unchanged`/`Same` against `Deleted`: the
+        // target is bound directly, with no need for a total-but-panicking
+        // accessor on `Status`.
+        (Status::Deleted, Status::Unchanged(target) | Status::Same(target, _)) => Some(Ok(Op::Delete {
             uid,
             on: Side::Fastmail,
-            target: present.current(),
+            target,
         })),
-        (present, Status::Deleted) => Some(Ok(Op::Delete {
-            uid,
-            on: Side::ICloud,
-            target: present.current(),
-        })),
+        (Status::Unchanged(target) | Status::Same(target, _), Status::Deleted) => Some(Ok(Op::Delete { uid, on: Side::ICloud, target })),
         (i, f) => {
             let (icloud, fastmail, synced) = (i.refreshed(), f.refreshed(), baseline.rehash());
             (icloud.is_some() || fastmail.is_some() || synced.is_some()).then_some(Ok(Op::Refresh { uid, icloud, fastmail, synced }))
@@ -573,6 +585,20 @@ mod tests {
     }
 
     #[test]
+    fn held_uid_is_dropped_from_the_other_sides_unsynced() {
+        // iCloud's u1 is duplicated (held); Fastmail's single u1 has no state
+        // row. Fastmail's copy must not reach pairing, or pairing would
+        // Create a third copy on iCloud.
+        let icloud = snapshot([("/i/u1.vcf", fetched("i1", synced())), ("/i/copy.vcf", fetched("c1", synced()))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", synced()))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &[], Side::ICloud));
+
+        assert_eq!(planned.unsynced.fastmail, Vec::new());
+        assert_eq!(render(&planned.plan), "! duplicate uid=u1 on icloud: /i/copy.vcf, /i/u1.vcf");
+    }
+
+    #[test]
     fn unsynced_cards_get_no_ops() {
         let icloud = snapshot([("/i/u1.vcf", unchanged("i1")), ("/i/u5.vcf", fetched("i5", card("u5", "Ann Lee")))]);
         let fastmail = snapshot([("/f/u1.vcf", unchanged("f1")), ("/f/u6.vcf", fetched("f6", card("u6", "Sam Poe")))]);
@@ -605,20 +631,24 @@ mod tests {
 
         let planned = plan(&input(&icloud, &fastmail, &state(), Side::ICloud));
 
-        assert_eq!(render(&planned.plan), "! unreadable icloud /i/moved.vcf@m1: vCard has no UID");
+        assert_eq!(
+            render(&planned.plan),
+            "! unreadable icloud /i/moved.vcf@m1: vCard has no UID; ! deletion deferred on icloud uid=u1: unreadable card on that side"
+        );
     }
 
     #[test]
     fn moved_held_card_is_never_deleted() {
-        // Same blind spot with a Held entry at an unknown href: no diagnostic
-        // is emitted (Held cards already have their own card failure), and
-        // no op at all.
+        // Same blind spot with a Held entry at an unknown href: no card
+        // failure diagnostic is emitted for the Held entry itself (it has its
+        // own), but the row it might be hiding is still reported as deferred
+        // rather than silently skipped.
         let icloud = snapshot([("/i/moved.vcf", Entry::Held(ETag::from("m1")))]);
         let fastmail = snapshot([("/f/u1.vcf", unchanged("f1"))]);
 
         let planned = plan(&input(&icloud, &fastmail, &state(), Side::ICloud));
 
-        assert_eq!(render(&planned.plan), "(nothing)");
+        assert_eq!(render(&planned.plan), "! deletion deferred on icloud uid=u1: unreadable card on that side");
     }
 
     #[test]
@@ -637,7 +667,12 @@ mod tests {
 
         let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
 
-        assert_eq!(render(&planned.plan), "update fastmail uid=u2 /f/u2.vcf@f1");
+        // u1's own row is skipped (iCloud is uncertain and u1 looks deleted
+        // there) and reported, but u2 is still planned normally.
+        assert_eq!(
+            render(&planned.plan),
+            "update fastmail uid=u2 /f/u2.vcf@f1; ! deletion deferred on icloud uid=u1: unreadable card on that side"
+        );
     }
 
     #[test]

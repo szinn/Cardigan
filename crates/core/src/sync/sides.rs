@@ -52,14 +52,17 @@ impl SideView {
                     }
                 }
                 Entry::Unchanged(etag) => {
-                    // CG-8 marks only state hrefs unchanged; anything else is
-                    // ignored.
+                    // CG-8 marks only state hrefs unchanged. One at an href no
+                    // state row knows is a card whose UID cannot be known;
+                    // same class as an unreadable or held card there.
                     if let Some(uid) = synced_uid {
                         let resource = Resource {
                             href: href.clone(),
                             etag: etag.clone(),
                         };
                         found.entry(uid.clone()).or_default().push((resource, None));
+                    } else {
+                        view.uncertain = true;
                     }
                 }
                 Entry::Fetched { etag, card: Err(error) } => {
@@ -257,6 +260,14 @@ mod tests {
             card: Err(VCardError::MissingUid),
         };
         let view = classify(&snapshot([("/i/u1.vcf", unchanged("i1")), ("/i/moved.vcf", unreadable)]));
+        assert!(view.uncertain);
+    }
+
+    #[test]
+    fn unchanged_at_an_unknown_href_is_uncertain() {
+        // CG-8 only marks state hrefs unchanged, but a bug there (or a stale
+        // state pass) must not make the planner treat a state row as gone.
+        let view = classify(&snapshot([("/i/u1.vcf", unchanged("i1")), ("/i/ghost.vcf", unchanged("g1"))]));
         assert!(view.uncertain);
     }
 

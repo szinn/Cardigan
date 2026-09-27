@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
     contact::{ETag, Href, Side, VCard, VCardError},
@@ -79,14 +79,20 @@ pub fn fetch_lists(icloud: &[(Href, ETag)], fastmail: &[(Href, ETag)], state: &[
         icloud: changed(Side::ICloud, icloud, state),
         fastmail: changed(Side::Fastmail, fastmail, state),
     };
+    // Built once, not on every state row: `is_listed`/`Vec::contains` inside
+    // the loop below made this quadratic in the number of state rows.
+    let icloud_listed: HashSet<&Href> = icloud.iter().map(|(href, _)| href).collect();
+    let fastmail_listed: HashSet<&Href> = fastmail.iter().map(|(href, _)| href).collect();
+    let icloud_fetch: HashSet<&Href> = lists.icloud.iter().collect();
+    let fastmail_fetch: HashSet<&Href> = lists.fastmail.iter().collect();
     let mut extra_icloud = Vec::new();
     let mut extra_fastmail = Vec::new();
     for row in state {
         let (i, f) = (&row.icloud.href, &row.fastmail.href);
-        if touched(f, fastmail, &lists.fastmail) && is_listed(i, icloud) && !lists.icloud.contains(i) {
+        if touched(f, &fastmail_listed, &fastmail_fetch) && icloud_listed.contains(i) && !icloud_fetch.contains(i) {
             extra_icloud.push(i.clone());
         }
-        if touched(i, icloud, &lists.icloud) && is_listed(f, fastmail) && !lists.fastmail.contains(f) {
+        if touched(i, &icloud_listed, &icloud_fetch) && fastmail_listed.contains(f) && !fastmail_fetch.contains(f) {
             extra_fastmail.push(f.clone());
         }
     }
@@ -113,12 +119,8 @@ fn changed(side: Side, listing: &[(Href, ETag)], state: &[ContactState]) -> Vec<
 }
 
 /// The stored card is being fetched, or is no longer at its stored href.
-fn touched(stored: &Href, listing: &[(Href, ETag)], fetch: &[Href]) -> bool {
-    fetch.contains(stored) || !is_listed(stored, listing)
-}
-
-fn is_listed(href: &Href, listing: &[(Href, ETag)]) -> bool {
-    listing.iter().any(|(listed, _)| listed == href)
+fn touched(stored: &Href, listed: &HashSet<&Href>, fetch: &HashSet<&Href>) -> bool {
+    fetch.contains(stored) || !listed.contains(stored)
 }
 
 #[cfg(test)]

@@ -227,6 +227,12 @@ pub enum Diagnostic {
     /// photo could not be kept. No op; `fetch_lists` prevents this, so CG-8
     /// only counts and warns.
     UnreadTarget { side: Side, uid: Uid, target: Resource },
+    /// A synced row was skipped because `side`, the uncertain side, has
+    /// nothing at this row's tracked resource there: that might be a real
+    /// deletion, or it might be hiding at an href the planner could not
+    /// attribute (unreadable, held, or an unattributed `Unchanged`). No op;
+    /// CG-8 only counts and warns rather than recording a card failure.
+    DeletionDeferred { side: Side, uid: Uid },
 }
 
 impl fmt::Display for Diagnostic {
@@ -245,6 +251,7 @@ impl fmt::Display for Diagnostic {
                 found,
             } => write!(f, "uid changed on {side} {href}@{etag}: {stored} → {found}"),
             Self::UnreadTarget { side, uid, target } => write!(f, "unread target {side} uid={uid} {target}"),
+            Self::DeletionDeferred { side, uid } => write!(f, "deletion deferred on {side} uid={uid}: unreadable card on that side"),
         }
     }
 }
@@ -369,6 +376,10 @@ mod tests {
                     uid: Uid::from("u5"),
                     target: res("/i/u5.vcf", "i5"),
                 },
+                Diagnostic::DeletionDeferred {
+                    side: Side::Fastmail,
+                    uid: Uid::from("u6"),
+                },
             ],
         };
 
@@ -388,6 +399,7 @@ mod tests {
         ! duplicate uid=u2 on icloud: /i/a.vcf, /i/b.vcf
         ! uid changed on fastmail /f/u3.vcf@f9: u3 → u4
         ! unread target icloud uid=u5 /i/u5.vcf@i5
+        ! deletion deferred on fastmail uid=u6: unreadable card on that side
         ");
     }
 
