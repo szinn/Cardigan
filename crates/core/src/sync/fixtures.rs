@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::{Entry, Resource, SYNC_HASH, Snapshot};
+use super::{Entry, Resource, SYNC_HASH, Snapshot, UnsyncedCard};
 use crate::{
     contact::{CANONICAL_VERSION, ETag, Href, VCard},
     state::{ContactState, SideState},
@@ -66,4 +66,22 @@ pub(crate) fn fetched(etag: &str, card: VCard) -> Entry {
 
 pub(crate) fn snapshot<const N: usize>(entries: [(&str, Entry); N]) -> Snapshot {
     entries.into_iter().map(|(href, entry)| (Href::from(href), entry)).collect()
+}
+
+/// An unsynced iCloud card at `/i/{uid}.vcf` with ETag `i-{uid}`.
+pub(crate) fn on_icloud(card: VCard) -> UnsyncedCard {
+    let uid = card.uid().as_str().to_owned();
+    UnsyncedCard {
+        resource: res(&format!("/i/{uid}.vcf"), &format!("i-{uid}")),
+        card,
+    }
+}
+
+/// An unsynced Fastmail card at `/f/{uid}.vcf` with ETag `f-{uid}`.
+pub(crate) fn on_fastmail(card: VCard) -> UnsyncedCard {
+    let uid = card.uid().as_str().to_owned();
+    UnsyncedCard {
+        resource: res(&format!("/f/{uid}.vcf"), &format!("f-{uid}")),
+        card,
+    }
 }

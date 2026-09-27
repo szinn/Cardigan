@@ -72,6 +72,33 @@ impl SyncedCard {
     }
 }
 
+/// Which pairing pass gave a Fastmail card the iCloud UID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairPass {
+    /// Pass 2: the same content under different UIDs.
+    Content,
+    /// Pass 3: the identity heuristic.
+    Identity,
+}
+
+impl PairPass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::Identity => "identity",
+        }
+    }
+}
+
+/// A pass-3 pair's two originals, recorded in the conflict history (origin
+/// `baseline`) before any write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecreateConflict {
+    pub winner: Side,
+    pub icloud_card: VCard,
+    pub fastmail_card: VCard,
+}
+
 /// One step of a sync cycle. Every server write names the side it goes to and
 /// the ETag guarding it; state-only ops (`Adopt`, `Refresh`, `Forget`) write
 /// no server.
@@ -120,6 +147,27 @@ pub enum Op {
         fastmail: Resource,
         synced: SyncedCard,
     },
+    /// Pairing passes 2 and 3: the Fastmail card takes the iCloud card's UID.
+    /// CG-8 runs these steps in order; a crash between any two converges on
+    /// the next cycle's pairing instead of duplicating:
+    /// 1. record `conflict` in the conflict history (pass 3 only);
+    /// 2. PUT `put_icloud` over `icloud` (`If-Match`), when set (pass 3,
+    ///    Fastmail wins);
+    /// 3. DELETE `old_fastmail` (`If-Match`);
+    /// 4. PUT `create_fastmail` to Fastmail at a new href (`If-None-Match: *`);
+    /// 5. add the state row for `uid` with `synced`.
+    Recreate {
+        uid: Uid,
+        pass: PairPass,
+        icloud: Resource,
+        old_fastmail: Resource,
+        /// The UID the Fastmail card had before.
+        fastmail_uid: Uid,
+        put_icloud: Option<VCard>,
+        create_fastmail: VCard,
+        synced: SyncedCard,
+        conflict: Option<RecreateConflict>,
+    },
     /// State only: record a side's new href/ETag (a server rewrite, the
     /// daemon's own write coming back, or a move) and, with `synced`, new
     /// content and hash.
@@ -142,6 +190,7 @@ impl Op {
             | Self::Conflict { uid, .. }
             | Self::Resurrect { uid, .. }
             | Self::Adopt { uid, .. }
+            | Self::Recreate { uid, .. }
             | Self::Refresh { uid, .. }
             | Self::Forget { uid } => uid,
         }
@@ -152,7 +201,7 @@ impl Op {
     pub fn log_op(&self) -> Option<&'static str> {
         match self {
             Self::Create { .. } | Self::Resurrect { .. } => Some("add"),
-            Self::Update { .. } | Self::Conflict { .. } => Some("update"),
+            Self::Update { .. } | Self::Conflict { .. } | Self::Recreate { .. } => Some("update"),
             Self::Delete { .. } => Some("remove"),
             Self::Adopt { .. } | Self::Refresh { .. } | Self::Forget { .. } => None,
         }
@@ -197,6 +246,25 @@ impl fmt::Display for Op {
                 }
                 if synced.is_some() {
                     f.write_str(" content")?;
+                }
+                Ok(())
+            }
+            Self::Recreate {
+                uid,
+                pass,
+                icloud,
+                old_fastmail,
+                fastmail_uid,
+                put_icloud,
+                conflict,
+                ..
+            } => {
+                write!(f, "recreate({}) uid={uid} fastmail {old_fastmail} was {fastmail_uid}", pass.as_str())?;
+                if put_icloud.is_some() {
+                    write!(f, " put icloud {icloud}")?;
+                }
+                if let Some(conflict) = conflict {
+                    write!(f, " {} wins", conflict.winner)?;
                 }
                 Ok(())
             }
@@ -437,6 +505,32 @@ mod tests {
             Some("add")
         );
         assert_eq!(Op::Forget { uid: u1.clone() }.uid(), &u1);
+    }
+
+    #[test]
+    fn recreate_renders_its_steps() {
+        let icloud = card("ic-1", "Jane Doe");
+        let fastmail = card("fm-1", "Jane Doe");
+        let op = Op::Recreate {
+            uid: Uid::from("ic-1"),
+            pass: PairPass::Identity,
+            icloud: res("/i/ic-1.vcf", "i1"),
+            old_fastmail: res("/f/fm-1.vcf", "f1"),
+            fastmail_uid: Uid::from("fm-1"),
+            put_icloud: Some(fastmail.with_uid(&Uid::from("ic-1"))),
+            create_fastmail: fastmail.with_uid(&Uid::from("ic-1")),
+            synced: SyncedCard::recorded(&fastmail.with_uid(&Uid::from("ic-1"))),
+            conflict: Some(RecreateConflict {
+                winner: Side::Fastmail,
+                icloud_card: icloud,
+                fastmail_card: fastmail,
+            }),
+        };
+        assert_eq!(
+            op.to_string(),
+            "recreate(identity) uid=ic-1 fastmail /f/fm-1.vcf@f1 was fm-1 put icloud /i/ic-1.vcf@i1 fastmail wins"
+        );
+        assert_eq!(op.log_op(), Some("update"));
     }
 
     #[test]
