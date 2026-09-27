@@ -12,7 +12,7 @@ mod sides;
 mod snapshot;
 
 pub use guard::{DELETE_FLOOR, DELETE_PERCENT, MassDeletion, check_deletions};
-pub use pairing::{Paired, pair};
+pub use pairing::{Paired, Skip, pair};
 pub use plan::{Diagnostic, Op, PairPass, Plan, RecreateConflict, Resource, SYNC_HASH, SyncedCard, Unsynced, UnsyncedCard};
 pub use planner::{PlanInput, Planned, plan};
 pub use snapshot::{Entry, FetchLists, Snapshot, fetch_lists};
