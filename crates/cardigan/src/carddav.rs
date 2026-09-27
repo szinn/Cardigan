@@ -46,7 +46,6 @@ mod tests {
             poll_interval: Duration::from_secs(120),
             database_path: PathBuf::from("/nonexistent"),
             conflict_winner: Side::ICloud,
-            max_photo_bytes: 1024,
         }
     }
 

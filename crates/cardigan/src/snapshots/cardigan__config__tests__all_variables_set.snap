@@ -16,5 +16,4 @@ Config {
     poll_interval: 300s,
     database_path: "/var/lib/cardigan",
     conflict_winner: Fastmail,
-    max_photo_bytes: 2048,
 }

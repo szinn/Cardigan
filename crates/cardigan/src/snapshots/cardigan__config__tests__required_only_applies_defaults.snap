@@ -16,5 +16,4 @@ Config {
     poll_interval: 120s,
     database_path: "/var/lib/cardigan",
     conflict_winner: ICloud,
-    max_photo_bytes: 1048576,
 }

@@ -11,7 +11,6 @@ pub const DEFAULT_ICLOUD_URL: &str = "https://contacts.icloud.com";
 pub const DEFAULT_FASTMAIL_URL: &str = "https://carddav.fastmail.com";
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 120;
 pub const MIN_POLL_INTERVAL_SECS: u64 = 60;
-pub const DEFAULT_MAX_PHOTO_BYTES: u64 = 1024 * 1024;
 
 /// Validated runtime configuration, loaded entirely from `CARDIGAN_*`
 /// environment variables.
@@ -22,7 +21,6 @@ pub struct Config {
     pub poll_interval: Duration,
     pub database_path: PathBuf,
     pub conflict_winner: ConflictWinner,
-    pub max_photo_bytes: u64,
 }
 
 /// Connection settings for one CardDAV endpoint. The URL is the discovery
@@ -68,7 +66,6 @@ struct RawConfig {
     poll_interval_secs: Option<String>,
     database_path: Option<String>,
     conflict_winner: Option<String>,
-    max_photo_bytes: Option<String>,
 }
 
 impl Config {
@@ -149,7 +146,6 @@ impl TryFrom<RawConfig> for Config {
             poll_interval: Duration::from_secs(poll_interval_secs),
             database_path: PathBuf::from(database_path),
             conflict_winner: parse_or(raw.conflict_winner, "CARDIGAN_CONFLICT_WINNER", ConflictWinner::ICloud)?,
-            max_photo_bytes: parse_or(raw.max_photo_bytes, "CARDIGAN_MAX_PHOTO_BYTES", DEFAULT_MAX_PHOTO_BYTES)?,
         })
     }
 }
@@ -211,7 +207,6 @@ mod tests {
             ("CARDIGAN_FASTMAIL_URL", "http://localhost:5232/fastmail"),
             ("CARDIGAN_POLL_INTERVAL_SECS", "300"),
             ("CARDIGAN_CONFLICT_WINNER", "Fastmail"),
-            ("CARDIGAN_MAX_PHOTO_BYTES", "2048"),
         ]))
         .unwrap();
         insta::assert_debug_snapshot!(config);
@@ -293,9 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn non_numeric_max_photo_bytes_is_rejected() {
-        let err = load(&with(&[("CARDIGAN_MAX_PHOTO_BYTES", "1MiB")])).unwrap_err();
-        assert_eq!(err.to_string(), "invalid value for CARDIGAN_MAX_PHOTO_BYTES: invalid digit found in string");
+    fn max_photo_bytes_variable_is_ignored() {
+        // Removed in CG-9; an old deployment that still sets it must start.
+        let config = load(&with(&[("CARDIGAN_MAX_PHOTO_BYTES", "1MiB")])).unwrap();
+        assert_eq!(config.poll_interval, Duration::from_secs(DEFAULT_POLL_INTERVAL_SECS));
     }
 
     fn load_with_database_path(path: &str) -> Config {
