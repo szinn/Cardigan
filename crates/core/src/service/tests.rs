@@ -1,13 +1,14 @@
 //! `SyncService` against two `InMemoryAddressBook`s and an `InMemoryState`.
 //! Cards are synthetic and PII-free.
 
-use super::*;
+use super::{href::mint_href, *};
 use crate::{
+    addressbook::Precondition,
     contact::{CANONICAL_VERSION, Href, Uid, VCard},
     repository::transaction,
     state::{CardFailureRepository, ContactStateRepository, FailedCard, FailureOp, FailureReason, NewContactState, SideState},
     sync::SyncedCard,
-    test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp},
+    test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp, Write},
 };
 
 const ICLOUD_URL: &str = "https://icloud.test/card/";
@@ -98,7 +99,7 @@ impl Harness {
     async fn dry_run(&self) -> (CyclePlan, Option<MassDeletion>) {
         match self.run(CycleMode::DryRun, false).await.expect("dry run succeeds") {
             CycleOutcome::DryRun { cycle, blocked } => (cycle, blocked),
-            other @ CycleOutcome::Blocked(_) => panic!("expected a dry run, got {other:?}"),
+            other => panic!("expected a dry run, got {other:?}"),
         }
     }
 
@@ -152,6 +153,13 @@ impl Harness {
         })
         .await
         .unwrap();
+    }
+
+    async fn applied(&self) -> CycleSummary {
+        match self.sync().await {
+            CycleOutcome::Applied(summary) => summary,
+            other => panic!("expected an applied cycle, got {other:?}"),
+        }
     }
 }
 
@@ -256,4 +264,311 @@ async fn a_moved_collection_is_rediscovered_after_a_listing_error() {
     let error = h.run(CycleMode::Sync, false).await.unwrap_err();
 
     assert!(matches!(error, Error::AddressBook(AddressBookError::Unauthorized)), "{error:?}");
+}
+
+fn minted(url: &str, uid: &str) -> Href {
+    mint_href(url, &Uid::from(uid))
+}
+
+#[tokio::test]
+async fn baseline_copies_each_unique_card_to_the_other_side() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.fastmail.external_put("/dav/bob.vcf", vcard("u2", "Bob Roe", ""));
+
+    let summary = h.applied().await;
+
+    assert_eq!((summary.to_fastmail.added, summary.to_icloud.added), (1, 1));
+    let to_fastmail = minted(FASTMAIL_URL, "u1");
+    assert_eq!(
+        h.fastmail.writes(),
+        [Write::Put {
+            href: to_fastmail.clone(),
+            precondition: Precondition::IfNoneMatch,
+            body: vcard("u1", "Jane Doe", "").into_bytes(),
+        }]
+    );
+    let rows = h.state.contacts();
+    let uids: Vec<&str> = rows.iter().map(|row| row.uid.as_str()).collect();
+    assert_eq!(uids, ["u1", "u2"]);
+    assert_eq!(rows[0].fastmail.href, to_fastmail);
+    assert_eq!(Some(rows[0].fastmail.etag.clone()), h.fastmail.card(&to_fastmail).map(|(etag, _)| etag));
+    assert_eq!(rows[1].icloud.href, minted(ICLOUD_URL, "u2"));
+    assert_eq!(h.state.endpoints().len(), 2, "discovery recorded");
+}
+
+#[tokio::test]
+async fn own_writes_are_not_synced_back() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.applied().await;
+    let writes = h.writes();
+
+    let summary = h.applied().await;
+
+    assert_eq!(h.writes(), writes);
+    assert_eq!(summary, CycleSummary::default());
+}
+
+#[tokio::test]
+async fn an_edit_is_pushed_with_if_match() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.applied().await;
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:new\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.updated, 1);
+    let target = minted(FASTMAIL_URL, "u1");
+    let last = h.fastmail.writes().pop().unwrap();
+    assert!(
+        matches!(&last, Write::Put { href, precondition: Precondition::IfMatch(_), .. } if *href == target),
+        "{last:?}"
+    );
+    assert_eq!(h.fastmail.card(&target).unwrap().1, vcard("u1", "Jane Doe", "NOTE:new\r\n").into_bytes());
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_deletion_is_propagated_and_a_double_deletion_forgotten() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.icloud.external_put("/card/bob.vcf", vcard("u2", "Bob Roe", ""));
+    h.applied().await;
+
+    h.icloud.external_delete(&href("/card/jane.vcf"));
+    h.icloud.external_delete(&href("/card/bob.vcf"));
+    h.fastmail.external_delete(&minted(FASTMAIL_URL, "u2"));
+    let summary = h.applied().await;
+
+    assert_eq!((summary.to_fastmail.removed, summary.forgotten), (1, 1));
+    assert!(
+        matches!(h.fastmail.writes().pop(), Some(Write::Delete { href, if_match: Some(_) }) if href == minted(FASTMAIL_URL, "u1")),
+        "the delete is guarded by If-Match"
+    );
+    assert!(h.state.contacts().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_put_etag_is_fetched() {
+    let h = Harness::new(Side::ICloud);
+    h.fastmail.omit_etag_on_put(true);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+
+    h.applied().await;
+
+    let target = minted(FASTMAIL_URL, "u1");
+    assert_eq!(
+        Some(h.state.contacts()[0].fastmail.etag.clone()),
+        h.fastmail.card(&target).map(|(etag, _)| etag)
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_write_is_held_and_the_cycle_continues() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/a.vcf", vcard("u1", "Ann Lee", ""));
+    h.icloud.external_put("/card/b.vcf", vcard("u2", "Bo Ray", ""));
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400 Bad Request".into()));
+
+    let summary = h.applied().await;
+
+    assert_eq!((summary.to_fastmail.added, summary.to_fastmail.errors), (1, 1));
+    let failures = h.state.failures();
+    assert_eq!(failures.len(), 1);
+    let failure = &failures[0];
+    assert_eq!(
+        (failure.side, failure.op, failure.reason, failure.attempts),
+        (Side::ICloud, FailureOp::Create, FailureReason::Rejected, 1)
+    );
+
+    let writes = h.fastmail.writes().len();
+    h.applied().await;
+    assert_eq!(h.fastmail.writes().len(), writes, "held until its backoff elapses");
+
+    h.advance(TimeDelta::seconds(61));
+    assert_eq!(h.applied().await.to_fastmail.added, 1);
+    assert!(h.state.failures().is_empty(), "cleared by the successful create");
+    assert_eq!(h.state.contacts().len(), 2);
+}
+
+#[tokio::test]
+async fn rate_limiting_aborts_the_cycle() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/a.vcf", vcard("u1", "Ann Lee", ""));
+    h.icloud.external_put("/card/b.vcf", vcard("u2", "Bo Ray", ""));
+    h.fastmail.fail_next(
+        BookOp::Put,
+        AddressBookError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        },
+    );
+
+    let error = h.run(CycleMode::Sync, false).await.unwrap_err();
+
+    assert!(matches!(error, Error::AddressBook(AddressBookError::RateLimited { .. })), "{error:?}");
+    assert_eq!(h.fastmail.writes().len(), 1, "nothing written after the rate limit");
+    assert!(h.state.failures().is_empty(), "a create is not held on abort");
+    assert_eq!(h.applied().await.to_fastmail.added, 2);
+}
+
+#[tokio::test]
+async fn an_unreadable_card_is_recorded_as_a_read_failure() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud
+        .external_put("/card/bad.vcf", "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEND:VCARD\r\n");
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.errors, 1);
+    let failure = &h.state.failures()[0];
+    assert_eq!(
+        (failure.op, failure.reason, failure.uid.clone()),
+        (FailureOp::Read, FailureReason::MissingUid, None)
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_state_write_failure_after_a_put_converges_without_a_duplicate() {
+    let h = Harness::new(Side::ICloud);
+    h.applied().await; // discovery recorded, so the next write is the op's
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.state.fail_next_write();
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.errors, 1);
+    assert!(h.state.contacts().is_empty());
+    assert_eq!(h.state.failures().len(), 2, "the source and the card already written are held");
+
+    h.advance(TimeDelta::seconds(61));
+    let summary = h.applied().await;
+
+    assert_eq!(summary.adopted, 1);
+    assert_eq!(h.state.contacts().len(), 1);
+    assert!(h.icloud.writes().is_empty(), "never copied back to iCloud");
+    assert_eq!(h.fastmail.writes().len(), 1);
+    assert!(h.state.failures().is_empty());
+}
+
+#[tokio::test]
+async fn discovery_is_recorded_once_per_process() {
+    let h = Harness::new(Side::ICloud);
+    h.applied().await;
+    h.icloud.fail_next(BookOp::Discover, AddressBookError::Unauthorized);
+
+    h.sync().await;
+
+    assert_eq!(h.state.endpoints().len(), 2);
+}
+
+#[tokio::test]
+async fn a_fatal_error_during_an_update_holds_the_edited_sides_source() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.applied().await;
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:edited\r\n"));
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Transient("503".into()));
+
+    let error = h.run(CycleMode::Sync, false).await.unwrap_err();
+
+    assert!(matches!(error, Error::AddressBook(AddressBookError::Transient(_))), "{error:?}");
+    let failures = h.state.failures();
+    assert_eq!(failures.len(), 1, "an Update is held on a fatal abort (holds_on_abort)");
+    let failure = &failures[0];
+    assert_eq!(
+        (failure.side, failure.op, failure.reason),
+        (Side::ICloud, FailureOp::Update, FailureReason::Transient)
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn held_cards_of_one_failed_op_release_together_not_by_each_cards_own_backoff() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+
+    // Attempt 1: rejected outright. attempts=1, delay=60s.
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400".into()));
+    let summary = h.applied().await;
+    assert_eq!(summary.to_fastmail.errors, 1);
+    h.advance(TimeDelta::seconds(61));
+
+    // Attempt 2: rejected again (same card, same ETag: attempts accrue).
+    // attempts=2, delay=120s.
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400".into()));
+    let summary = h.applied().await;
+    assert_eq!(summary.to_fastmail.errors, 1);
+    h.advance(TimeDelta::seconds(121));
+
+    // Attempt 3: the PUT lands, but the state write fails: the card is now
+    // on Fastmail, but not yet in state. The iCloud source's attempts
+    // continue (attempts=3, delay=240s); the newly-written Fastmail card is
+    // its own first failure (attempts=1, delay=60s).
+    h.state.fail_next_write();
+    let summary = h.applied().await;
+    assert_eq!(summary.to_fastmail.errors, 1);
+    assert_eq!(h.state.failures().len(), 2, "the icloud source and the fastmail card the PUT actually wrote");
+    let fastmail_writes = h.fastmail.writes().len();
+
+    // The written card's own backoff (60s) elapses, but the source's
+    // (240s) has not (I1): the group must stay held together, or the
+    // written card would surface as unique to Fastmail and get copied
+    // back to iCloud.
+    h.advance(TimeDelta::seconds(61));
+    let after_short_backoff = h.applied().await;
+    assert_eq!(after_short_backoff, CycleSummary::default(), "no copy-back while the group is still held");
+    assert!(h.icloud.writes().is_empty(), "never copied back to iCloud");
+    assert_eq!(h.fastmail.writes().len(), fastmail_writes, "no retry either, until the whole group is due");
+
+    // Once every card in the group is due, it converges on a single state
+    // row from the two matching cards, with no duplicate write to either
+    // side.
+    h.advance(TimeDelta::seconds(200));
+    let converged = h.applied().await;
+    assert_eq!(converged.adopted, 1);
+    assert_eq!(h.state.contacts().len(), 1);
+    assert!(h.icloud.writes().is_empty(), "never copied back to iCloud");
+    assert_eq!(h.fastmail.writes().len(), fastmail_writes);
+    assert!(h.state.failures().is_empty());
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_failed_etag_fetch_after_a_put_still_holds_the_written_card() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.fastmail.omit_etag_on_put(true);
+    h.fastmail.fail_next(BookOp::Multiget, AddressBookError::Permanent("500".into()));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.errors, 1);
+    let failures = h.state.failures();
+    assert_eq!(failures.len(), 2, "the icloud source and the fastmail card the PUT actually wrote (I2)");
+    let fastmail_failure = failures
+        .iter()
+        .find(|failure| failure.side == Side::Fastmail)
+        .expect("the written card is held");
+    assert_eq!(fastmail_failure.etag, None, "the ETag could not be recovered");
+    assert!(h.state.contacts().is_empty());
+
+    let writes = h.fastmail.writes().len();
+    let next = h.applied().await;
+    assert_eq!(next, CycleSummary::default(), "held until due; no copy-back");
+    assert_eq!(h.fastmail.writes().len(), writes);
 }

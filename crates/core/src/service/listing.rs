@@ -107,17 +107,17 @@ impl SyncService {
     }
 
     /// Both snapshots. Phase A (`fetch_lists`) picks what to fetch; a card
-    /// whose failure is not yet due is `Held` and not fetched; a card the
-    /// multiget no longer finds was deleted since the listing and is left
-    /// out.
+    /// whose failure group is not yet due is `Held` and not fetched (I1:
+    /// every card of one failed op releases together — see `held_hrefs`); a
+    /// card the multiget no longer finds was deleted since the listing and
+    /// is left out.
     pub(super) async fn build(&self, listed: &Listed, stored: &Stored, now: DateTime<Utc>) -> Result<Built, Error> {
         let lists = fetch_lists(&listed.icloud.entries, &listed.fastmail.entries, &stored.contacts);
+        let held = held_hrefs(listed, &stored.failures, now);
         let mut built = Built::default();
-        built.icloud = self
-            .snapshot(Side::ICloud, &listed.icloud, &lists.icloud, &stored.failures, now, &mut built.fetched)
-            .await?;
+        built.icloud = self.snapshot(Side::ICloud, &listed.icloud, &lists.icloud, &held, &mut built.fetched).await?;
         built.fastmail = self
-            .snapshot(Side::Fastmail, &listed.fastmail, &lists.fastmail, &stored.failures, now, &mut built.fetched)
+            .snapshot(Side::Fastmail, &listed.fastmail, &lists.fastmail, &held, &mut built.fetched)
             .await?;
         Ok(built)
     }
@@ -127,21 +127,11 @@ impl SyncService {
         side: Side,
         listing: &SideListing,
         wanted: &[Href],
-        failures: &[CardFailure],
-        now: DateTime<Utc>,
+        held: &HashSet<(Side, Href)>,
         fetched: &mut HashSet<(Side, Href)>,
     ) -> Result<Snapshot, Error> {
-        let held: HashSet<&Href> = listing
-            .entries
-            .iter()
-            .filter(|(href, etag)| {
-                failures
-                    .iter()
-                    .any(|failure| failure.side == side && &failure.href == href && !failure.is_due(now, Some(etag)))
-            })
-            .map(|(href, _)| href)
-            .collect();
-        let to_fetch: Vec<Href> = wanted.iter().filter(|href| !held.contains(href)).cloned().collect();
+        let is_held = |href: &Href| held.contains(&(side, href.clone()));
+        let to_fetch: Vec<Href> = wanted.iter().filter(|href| !is_held(href)).cloned().collect();
         let found: HashMap<Href, FetchedCard> = if to_fetch.is_empty() {
             HashMap::new()
         } else {
@@ -157,7 +147,7 @@ impl SyncService {
 
         let mut snapshot = Snapshot::new();
         for (href, etag) in &listing.entries {
-            let entry = if held.contains(href) {
+            let entry = if is_held(href) {
                 Entry::Held(etag.clone())
             } else if to_fetch.contains(href) {
                 let Some(card) = found.get(href) else {
@@ -175,6 +165,33 @@ impl SyncService {
         }
         Ok(snapshot)
     }
+}
+
+/// The `(side, href)`s to hold rather than fetch: every failure row whose
+/// UID group is not yet due (I1). Cards of one failed op share the op's UID
+/// (see `executor::failed_cards`), so they are held and released together —
+/// a card written late must not surface on its own while its source is
+/// still held, or pairing would see it as unique to one side and copy it
+/// back, duplicating the contact. A row with no UID (an unreadable card) is
+/// its own single-row group. A row's own due-ness compares its stored ETag
+/// with its href's current ETag in its side's listing; a row whose href is
+/// no longer listed on that side counts as due.
+fn held_hrefs(listed: &Listed, failures: &[CardFailure], now: DateTime<Utc>) -> HashSet<(Side, Href)> {
+    let is_due = |failure: &CardFailure| {
+        let current = listed.side(failure.side).etag(&failure.href);
+        failure.is_due(now, current.as_ref())
+    };
+    let mut held = HashSet::new();
+    for failure in failures {
+        let group_due = match &failure.uid {
+            Some(uid) => failures.iter().filter(|other| other.uid.as_ref() == Some(uid)).all(is_due),
+            None => is_due(failure),
+        };
+        if !group_due {
+            held.insert((failure.side, failure.href.clone()));
+        }
+    }
+    held
 }
 
 /// One side's full membership: `changes_since(None)` with a fresh token, or

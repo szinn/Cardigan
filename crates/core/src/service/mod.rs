@@ -2,8 +2,11 @@
 //! then apply the plan one contact at a time. This is the only part of
 //! cg-core that does I/O; `sync` stays pure.
 
+mod apply;
+mod executor;
 mod href;
 mod listing;
+mod summary;
 #[cfg(test)]
 mod tests;
 
@@ -12,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, TimeDelta, Utc};
 
 use self::listing::Stored;
+pub use self::summary::{CycleSummary, DirectionCounts};
 use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, Collection},
@@ -90,6 +94,8 @@ pub enum CycleOutcome {
     /// The mass-deletion guard stopped the cycle before any write. CG-9
     /// decides whether to offer an override.
     Blocked(MassDeletion),
+    /// A sync cycle ran; what it did.
+    Applied(CycleSummary),
 }
 
 /// Both sides' address book collections, as discovered.
@@ -169,7 +175,8 @@ impl SyncService {
             tracing::warn!("{blocked}; wrote nothing this cycle");
             return Ok(CycleOutcome::Blocked(blocked));
         }
-        Err(Error::Unimplemented("SyncService: applying a plan (CG-8 Task 3)"))
+        let summary = self.apply(&cycle, &stored, &built, &listed, &collections, now).await?;
+        Ok(CycleOutcome::Applied(summary))
     }
 
     fn book(&self, side: Side) -> &dyn AddressBook {
