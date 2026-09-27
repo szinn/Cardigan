@@ -62,6 +62,13 @@ impl MatchKeys {
     fn has_contact_points(&self) -> bool {
         !self.emails.is_empty() || !self.phones.is_empty()
     }
+
+    /// The normalized full name the heuristic compares (lower-cased,
+    /// whitespace collapsed), or `None` when the card has no usable name.
+    /// A name may be logged; the other keys may not.
+    pub fn name_key(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
 }
 
 impl fmt::Debug for MatchKeys {
@@ -245,6 +252,15 @@ mod tests {
         assert!(a.is_match(&b));
         assert!(!a.is_match(&card(&["FN:Jane Doe", "ORG:Other"]).match_keys()));
         assert!(!card(&["FN:Jane Doe"]).match_keys().is_match(&card(&["FN:Jane Doe"]).match_keys()));
+    }
+
+    #[test]
+    fn name_key_is_the_normalized_name() {
+        let card = VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nFN:  Jane   DOE \r\nEND:VCARD\r\n").unwrap();
+        assert_eq!(card.match_keys().name_key(), Some("jane doe"));
+
+        let nameless = VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u2\r\nFN:jane@example.com\r\nEND:VCARD\r\n").unwrap();
+        assert_eq!(nameless.match_keys().name_key(), None);
     }
 
     #[test]

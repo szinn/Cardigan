@@ -7,6 +7,7 @@ mod canonical;
 mod identity;
 mod parser;
 mod photo;
+mod rewrite;
 mod text;
 
 #[cfg(test)]
