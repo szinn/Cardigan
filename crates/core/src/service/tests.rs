@@ -6,7 +6,7 @@ use crate::{
     addressbook::Precondition,
     contact::{CANONICAL_VERSION, Href, Uid, VCard},
     repository::transaction,
-    state::{CardFailureRepository, ContactStateRepository, FailedCard, FailureOp, FailureReason, NewContactState, SideState},
+    state::{CardFailureRepository, ConflictOrigin, ContactStateRepository, FailedCard, FailureOp, FailureReason, NewContactState, SideState},
     sync::SyncedCard,
     test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp, Write},
 };
@@ -571,4 +571,132 @@ async fn a_failed_etag_fetch_after_a_put_still_holds_the_written_card() {
     let next = h.applied().await;
     assert_eq!(next, CycleSummary::default(), "held until due; no copy-back");
     assert_eq!(h.fastmail.writes().len(), writes);
+}
+
+const PHOTO: &str = "PHOTO;ENCODING=b;TYPE=JPEG:QUJD\r\n";
+
+#[tokio::test]
+async fn a_sync_conflict_keeps_both_versions_and_pushes_the_winner() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.applied().await;
+    let target = minted(FASTMAIL_URL, "u1");
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:icloud\r\n"));
+    h.fastmail.external_put(target.clone(), vcard("u1", "Jane Doe", "NOTE:fastmail\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.conflicts, 1);
+    let conflicts = h.state.conflicts();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!((conflicts[0].origin, conflicts[0].winner), (ConflictOrigin::Sync, Side::ICloud));
+    assert_eq!(conflicts[0].fastmail_vcard, vcard("u1", "Jane Doe", "NOTE:fastmail\r\n").into_bytes());
+    assert_eq!(h.fastmail.card(&target).unwrap().1, vcard("u1", "Jane Doe", "NOTE:icloud\r\n").into_bytes());
+    assert!(h.applied().await == CycleSummary::default(), "settled");
+}
+
+#[tokio::test]
+async fn a_baseline_conflict_with_fastmail_winning() {
+    let h = Harness::new(Side::Fastmail);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:icloud\r\n"));
+    h.fastmail.external_put("/dav/jane.vcf", vcard("u1", "Jane Doe", "NOTE:fastmail\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_icloud.conflicts, 1);
+    assert_eq!(
+        h.icloud.card(&href("/card/jane.vcf")).unwrap().1,
+        vcard("u1", "Jane Doe", "NOTE:fastmail\r\n").into_bytes()
+    );
+    let conflicts = h.state.conflicts();
+    assert_eq!((conflicts[0].origin, conflicts[0].winner), (ConflictOrigin::Baseline, Side::Fastmail));
+    assert_eq!(h.state.contacts().len(), 1);
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_conflict_is_recorded_even_when_the_push_fails() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:icloud\r\n"));
+    h.fastmail.external_put("/dav/jane.vcf", vcard("u1", "Jane Doe", "NOTE:fastmail\r\n"));
+    h.fastmail
+        .fail_next(BookOp::Put, AddressBookError::PreconditionFailed { href: href("/dav/jane.vcf") });
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.errors, 1);
+    assert_eq!(h.state.conflicts().len(), 1, "recorded before the push");
+    assert!(h.state.contacts().is_empty());
+    let mut held: Vec<Side> = h.state.failures().iter().map(|failure| failure.side).collect();
+    held.sort_by_key(|side| side.as_str());
+    assert_eq!(held, [Side::Fastmail, Side::ICloud], "both cards of the unsynced pair are held");
+
+    h.sync().await;
+    assert!(
+        h.icloud.writes().is_empty() && h.fastmail.writes().len() == 1,
+        "neither card is copied while held"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_content_pair_recreates_the_fastmail_card_under_the_icloud_uid() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/ann.vcf", vcard("ic-1", "Ann Lee", "EMAIL:ann@example.com\r\n"));
+    h.fastmail
+        .external_put("/dav/ann.vcf", vcard("fm-1", "Ann Lee", &format!("EMAIL:ann@example.com\r\n{PHOTO}")));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.updated, 1);
+    let target = minted(FASTMAIL_URL, "ic-1");
+    let recreated = vcard("ic-1", "Ann Lee", &format!("EMAIL:ann@example.com\r\n{PHOTO}")).into_bytes();
+    let writes = h.fastmail.writes();
+    assert!(
+        matches!(
+            writes.as_slice(),
+            [
+                Write::Delete { href: deleted, if_match: Some(_) },
+                Write::Put { href: created, precondition: Precondition::IfNoneMatch, body },
+            ] if deleted.as_str() == "/dav/ann.vcf" && *created == target && *body == recreated
+        ),
+        "{writes:?}"
+    );
+    assert!(h.icloud.writes().is_empty());
+    let rows = h.state.contacts();
+    assert_eq!((rows[0].uid.as_str(), &rows[0].fastmail.href), ("ic-1", &target));
+}
+
+#[tokio::test]
+async fn an_identity_pair_with_fastmail_winning_updates_icloud_first() {
+    let h = Harness::new(Side::Fastmail);
+    h.icloud
+        .external_put("/card/bo.vcf", vcard("ic-4", "Bo Ray", "EMAIL:bo@example.com\r\nNOTE:icloud\r\n"));
+    h.fastmail
+        .external_put("/dav/bo.vcf", vcard("fm-4", "Bo Ray", "EMAIL:bo@example.com\r\nNOTE:fastmail\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!((summary.to_fastmail.updated, summary.to_icloud.updated), (1, 1));
+    assert!(matches!(
+        h.icloud.writes().as_slice(),
+        [Write::Put {
+            precondition: Precondition::IfMatch(_),
+            ..
+        }]
+    ));
+    assert_eq!(
+        h.icloud.card(&href("/card/bo.vcf")).unwrap().1,
+        vcard("ic-4", "Bo Ray", "EMAIL:bo@example.com\r\nNOTE:fastmail\r\n").into_bytes()
+    );
+    assert!(matches!(h.fastmail.writes().as_slice(), [Write::Delete { .. }, Write::Put { .. }]));
+    let conflicts = h.state.conflicts();
+    assert_eq!((conflicts[0].origin, conflicts[0].winner), (ConflictOrigin::Baseline, Side::Fastmail));
+    assert_eq!(h.state.contacts()[0].uid.as_str(), "ic-4");
 }

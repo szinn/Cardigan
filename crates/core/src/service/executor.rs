@@ -9,7 +9,7 @@ use crate::{
     AddressBookError, Error,
     addressbook::Precondition,
     contact::{CANONICAL_VERSION, ETag, Href, Side, Uid, VCard},
-    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewContactState, SideState},
+    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, SideState},
     sync::{Op, Resource, SyncedCard},
     with_transaction,
 };
@@ -80,7 +80,76 @@ impl SyncService {
                 self.book(*on).delete(&target.href, Some(&target.etag)).await?;
                 self.drop_state(uid, vec![(*on, target.href.clone())]).await
             }
-            Op::Conflict { .. } | Op::Recreate { .. } => Err(Error::Unimplemented("SyncService: conflict and recreate (CG-8 Task 4)")),
+            Op::Conflict {
+                uid,
+                origin,
+                winner,
+                target,
+                source,
+                synced,
+                icloud_card,
+                fastmail_card,
+            } => {
+                self.record_conflict(NewConflict {
+                    uid: uid.clone(),
+                    origin: *origin,
+                    winner: *winner,
+                    icloud_vcard: icloud_card.as_bytes().to_vec(),
+                    fastmail_vcard: fastmail_card.as_bytes().to_vec(),
+                    detected_at: now,
+                })
+                .await?;
+                let loser = winner.other();
+                let precondition = Precondition::IfMatch(target.etag.clone());
+                let resource = self.write_card(loser, target.href.clone(), synced.body(), precondition, written).await?;
+                let clear = vec![(*winner, source.href.clone()), (loser, target.href.clone())];
+                self.write_state(StateWrite::pushed(uid, (loser, resource), source.clone(), synced, clear), now)
+                    .await
+            }
+            // Op::Recreate's documented order; Task 6 adds the journal before
+            // the DELETE.
+            Op::Recreate {
+                uid,
+                icloud,
+                old_fastmail,
+                put_icloud,
+                create_fastmail,
+                synced,
+                conflict,
+                ..
+            } => {
+                if let Some(conflict) = conflict {
+                    self.record_conflict(NewConflict {
+                        uid: uid.clone(),
+                        origin: ConflictOrigin::Baseline,
+                        winner: conflict.winner,
+                        icloud_vcard: conflict.icloud_card.as_bytes().to_vec(),
+                        fastmail_vcard: conflict.fastmail_card.as_bytes().to_vec(),
+                        detected_at: now,
+                    })
+                    .await?;
+                }
+                let icloud_now = match put_icloud {
+                    Some(card) => {
+                        let precondition = Precondition::IfMatch(icloud.etag.clone());
+                        self.write_card(Side::ICloud, icloud.href.clone(), card, precondition, written).await?
+                    }
+                    None => icloud.clone(),
+                };
+                let new_href = mint_href(&collections.fastmail.addressbook_url, uid);
+                self.fastmail.delete(&old_fastmail.href, Some(&old_fastmail.etag)).await?;
+                let fastmail_now = self
+                    .write_card(Side::Fastmail, new_href, create_fastmail, Precondition::IfNoneMatch, written)
+                    .await?;
+                let write = StateWrite {
+                    uid: uid.clone(),
+                    icloud: Some(icloud_now),
+                    fastmail: Some(fastmail_now),
+                    synced: Some(synced.clone()),
+                    clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, old_fastmail.href.clone())],
+                };
+                self.write_state(write, now).await
+            }
             Op::Adopt { uid, icloud, fastmail, synced } => {
                 let write = StateWrite {
                     uid: uid.clone(),
@@ -190,6 +259,13 @@ impl SyncService {
             }
             Ok(())
         })
+    }
+
+    /// Appends to the conflict history in its own transaction, before the
+    /// winner is pushed, so the losing version survives any later failure
+    /// (Decision 4).
+    pub(super) async fn record_conflict(&self, conflict: NewConflict) -> Result<(), Error> {
+        with_transaction!(self, conflict_repository, |tx| conflict_repository.add(tx, conflict).await.map(|_| ()))
     }
 
     /// Drops the contact's state row and clears the op's failures.
