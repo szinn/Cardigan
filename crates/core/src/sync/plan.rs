@@ -1,0 +1,447 @@
+use std::fmt;
+
+use crate::{
+    contact::{CardHash, ETag, HashOptions, Href, Side, Uid, VCard, VCardError},
+    state::ConflictOrigin,
+};
+
+/// The hash options for every content comparison in the sync engine: photos
+/// are not synced in v1, so no `PHOTO` property (URI or embedded) ever counts
+/// as content.
+pub const SYNC_HASH: HashOptions = HashOptions {
+    exclude_photo: true,
+    exclude_uid: false,
+};
+
+/// One resource on one side: where it is, and the ETag that guards writes to
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resource {
+    pub href: Href,
+    pub etag: ETag,
+}
+
+impl fmt::Display for Resource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.href, self.etag)
+    }
+}
+
+/// The card both sides hold once an op completes, in the form the state row
+/// records it: without photos, which are not synced in v1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncedCard {
+    /// The card as the state row records it (`last_synced_vcard`), with every
+    /// `PHOTO` removed. For a push, also the bytes to PUT unless
+    /// `put_with_photo` is set; see `body()`. Full contact data (PII): never
+    /// log it.
+    pub card: VCard,
+    /// `card.canonical_hash(SYNC_HASH)` under `CANONICAL_VERSION`: the state
+    /// row's `content_hash`.
+    pub content_hash: CardHash,
+    /// When set, PUT this instead of `card`: `card` plus the target card's own
+    /// `PHOTO` properties, so a write never removes the target's photo. The
+    /// state row still records `card`.
+    pub put_with_photo: Option<VCard>,
+}
+
+impl SyncedCard {
+    /// `source` as it goes to the other side, without its photos. When
+    /// `target` (the card being replaced) has photos, the PUT keeps them.
+    pub fn for_push(source: &VCard, target: Option<&VCard>) -> Self {
+        let mut synced = Self::recorded(source);
+        synced.put_with_photo = target.map(|target| synced.card.with_photos_of(target)).filter(|put| *put != synced.card);
+        synced
+    }
+
+    /// `card` as the state row records it: photos removed, hashed with
+    /// `SYNC_HASH`.
+    pub fn recorded(card: &VCard) -> Self {
+        let card = card.without_photos();
+        let content_hash = card.canonical_hash(SYNC_HASH);
+        Self {
+            card,
+            content_hash,
+            put_with_photo: None,
+        }
+    }
+
+    /// The bytes to PUT.
+    pub fn body(&self) -> &VCard {
+        self.put_with_photo.as_ref().unwrap_or(&self.card)
+    }
+}
+
+/// One step of a sync cycle. Every server write names the side it goes to and
+/// the ETag guarding it; state-only ops (`Adopt`, `Refresh`, `Forget`) write
+/// no server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    /// New on `to.other()` and not in state: PUT `synced.body()` to `to` at a
+    /// new href (`If-None-Match: *`), then add the state row. (Pairing stage,
+    /// CG-7.)
+    Create { uid: Uid, to: Side, source: Resource, synced: SyncedCard },
+    /// Changed on the other side: PUT `synced.body()` to `to` over `target`
+    /// (`If-Match: target.etag`), then update the row.
+    Update {
+        uid: Uid,
+        to: Side,
+        target: Resource,
+        source: Resource,
+        synced: SyncedCard,
+    },
+    /// Gone from the other side: DELETE `target` on `on` (`If-Match`), then
+    /// drop the row.
+    Delete { uid: Uid, on: Side, target: Resource },
+    /// Different content on both sides. Record both cards in the conflict
+    /// history first, then PUT `synced.body()` (the winner's card, keeping the
+    /// loser's photo) to the loser over
+    /// `target`. `origin` is `Sync` for a contact with a state row (update it)
+    /// and `Baseline` for one without (pairing pass 1: add the row).
+    Conflict {
+        uid: Uid,
+        origin: ConflictOrigin,
+        winner: Side,
+        target: Resource,
+        source: Resource,
+        synced: SyncedCard,
+        icloud_card: VCard,
+        fastmail_card: VCard,
+    },
+    /// Deleted on `to`, edited on the other side: the edit wins. PUT
+    /// `synced.body()` to `to` at a new href (`If-None-Match: *`), then update
+    /// the row.
+    Resurrect { uid: Uid, to: Side, source: Resource, synced: SyncedCard },
+    /// The same card on both sides with no state row (crash recovery, or
+    /// pairing pass 1): add the row. No server write.
+    Adopt {
+        uid: Uid,
+        icloud: Resource,
+        fastmail: Resource,
+        synced: SyncedCard,
+    },
+    /// State only: record a side's new href/ETag (a server rewrite, the
+    /// daemon's own write coming back, or a move) and, with `synced`, new
+    /// content and hash.
+    Refresh {
+        uid: Uid,
+        icloud: Option<Resource>,
+        fastmail: Option<Resource>,
+        synced: Option<SyncedCard>,
+    },
+    /// State only: gone from both sides; drop the row.
+    Forget { uid: Uid },
+}
+
+impl Op {
+    pub fn uid(&self) -> &Uid {
+        match self {
+            Self::Create { uid, .. }
+            | Self::Update { uid, .. }
+            | Self::Delete { uid, .. }
+            | Self::Conflict { uid, .. }
+            | Self::Resurrect { uid, .. }
+            | Self::Adopt { uid, .. }
+            | Self::Refresh { uid, .. }
+            | Self::Forget { uid } => uid,
+        }
+    }
+
+    /// The spec's per-record log op. `None` for state-only ops, which only
+    /// count in the cycle summary.
+    pub fn log_op(&self) -> Option<&'static str> {
+        match self {
+            Self::Create { .. } | Self::Resurrect { .. } => Some("add"),
+            Self::Update { .. } | Self::Conflict { .. } => Some("update"),
+            Self::Delete { .. } => Some("remove"),
+            Self::Adopt { .. } | Self::Refresh { .. } | Self::Forget { .. } => None,
+        }
+    }
+}
+
+/// ` photo-kept` when the PUT keeps the target card's own photo.
+fn kept(synced: &SyncedCard) -> &'static str {
+    if synced.put_with_photo.is_some() { " photo-kept" } else { "" }
+}
+
+/// One line, PII-free: sides, UID, hrefs and ETags only.
+impl fmt::Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Create { uid, to, source, synced } => write!(f, "create {to} uid={uid} from={}{}", source.href, kept(synced)),
+            Self::Update { uid, to, target, synced, .. } => write!(f, "update {to} uid={uid} {target}{}", kept(synced)),
+            Self::Delete { uid, on, target } => write!(f, "delete {on} uid={uid} {target}"),
+            Self::Conflict {
+                uid,
+                origin,
+                winner,
+                target,
+                synced,
+                ..
+            } => write!(
+                f,
+                "conflict({}) {winner} wins uid={uid} → {} {target}{}",
+                origin.as_str(),
+                winner.other(),
+                kept(synced)
+            ),
+            Self::Resurrect { uid, to, source, synced } => write!(f, "resurrect {to} uid={uid} from={}{}", source.href, kept(synced)),
+            Self::Adopt { uid, icloud, fastmail, synced } => write!(f, "adopt uid={uid} icloud={icloud} fastmail={fastmail}{}", kept(synced)),
+            Self::Refresh { uid, icloud, fastmail, synced } => {
+                write!(f, "refresh uid={uid}")?;
+                if let Some(resource) = icloud {
+                    write!(f, " icloud={resource}")?;
+                }
+                if let Some(resource) = fastmail {
+                    write!(f, " fastmail={resource}")?;
+                }
+                if synced.is_some() {
+                    f.write_str(" content")?;
+                }
+                Ok(())
+            }
+            Self::Forget { uid } => write!(f, "forget uid={uid}"),
+        }
+    }
+}
+
+/// A card the planner will not act on this cycle. CG-8 records each as a
+/// `card_failures` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Diagnostic {
+    /// The card did not parse (no UID, vCard 4.0, malformed). Its UID is held
+    /// when the href is in state.
+    Unreadable { side: Side, href: Href, etag: ETag, error: VCardError },
+    /// One UID at several hrefs on one side: ambiguous, so none is synced.
+    DuplicateUid { side: Side, uid: Uid, hrefs: Vec<Href> },
+    /// The card at a synced href now carries another UID: both UIDs are held,
+    /// never deleted or duplicated.
+    UidChanged {
+        side: Side,
+        href: Href,
+        etag: ETag,
+        stored: Uid,
+        found: Uid,
+    },
+    /// An update would replace a card that was not fetched this cycle, so its
+    /// photo could not be kept. No op; `fetch_lists` prevents this, so CG-8
+    /// only counts and warns.
+    UnreadTarget { side: Side, uid: Uid, target: Resource },
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable { side, href, etag, error } => write!(f, "unreadable {side} {href}@{etag}: {error}"),
+            Self::DuplicateUid { side, uid, hrefs } => {
+                let hrefs: Vec<&str> = hrefs.iter().map(Href::as_str).collect();
+                write!(f, "duplicate uid={uid} on {side}: {}", hrefs.join(", "))
+            }
+            Self::UidChanged {
+                side,
+                href,
+                etag,
+                stored,
+                found,
+            } => write!(f, "uid changed on {side} {href}@{etag}: {stored} → {found}"),
+            Self::UnreadTarget { side, uid, target } => write!(f, "unread target {side} uid={uid} {target}"),
+        }
+    }
+}
+
+/// The operations for one cycle plus the cards held back and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    pub ops: Vec<Op>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl fmt::Display for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for op in &self.ops {
+            writeln!(f, "{op}")?;
+        }
+        for diagnostic in &self.diagnostics {
+            writeln!(f, "! {diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A parsed card whose UID has no state row: input to pairing (CG-7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsyncedCard {
+    pub resource: Resource,
+    pub card: VCard,
+}
+
+/// Both sides' unsynced cards, each side in UID order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unsynced {
+    pub icloud: Vec<UnsyncedCard>,
+    pub fastmail: Vec<UnsyncedCard>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::fixtures::{EMBEDDED_PHOTO, URI_PHOTO, card, card_with, res};
+
+    fn plain(uid: &str) -> SyncedCard {
+        SyncedCard::recorded(&card_with(uid, "Jane Doe", "EMAIL:jane@example.com\r\n"))
+    }
+
+    #[test]
+    fn plan_renders_one_pii_free_line_per_item() {
+        let u1 = Uid::from("u1");
+        let kept = SyncedCard::for_push(&card("u1", "Jane Doe"), Some(&card_with("u1", "Jane Doe", EMBEDDED_PHOTO)));
+        let plan = Plan {
+            ops: vec![
+                Op::Create {
+                    uid: u1.clone(),
+                    to: Side::Fastmail,
+                    source: res("/i/u1.vcf", "i1"),
+                    synced: plain("u1"),
+                },
+                Op::Update {
+                    uid: u1.clone(),
+                    to: Side::Fastmail,
+                    target: res("/f/u1.vcf", "f1"),
+                    source: res("/i/u1.vcf", "i2"),
+                    synced: kept,
+                },
+                Op::Delete {
+                    uid: u1.clone(),
+                    on: Side::ICloud,
+                    target: res("/i/u1.vcf", "i1"),
+                },
+                Op::Conflict {
+                    uid: u1.clone(),
+                    origin: ConflictOrigin::Sync,
+                    winner: Side::ICloud,
+                    target: res("/f/u1.vcf", "f2"),
+                    source: res("/i/u1.vcf", "i2"),
+                    synced: plain("u1"),
+                    icloud_card: plain("u1").card,
+                    fastmail_card: plain("u1").card,
+                },
+                Op::Resurrect {
+                    uid: u1.clone(),
+                    to: Side::ICloud,
+                    source: res("/f/u1.vcf", "f2"),
+                    synced: plain("u1"),
+                },
+                Op::Adopt {
+                    uid: u1.clone(),
+                    icloud: res("/i/u1.vcf", "i1"),
+                    fastmail: res("/f/u1.vcf", "f1"),
+                    synced: plain("u1"),
+                },
+                Op::Refresh {
+                    uid: u1.clone(),
+                    icloud: Some(res("/i/u1.vcf", "i2")),
+                    fastmail: None,
+                    synced: Some(plain("u1")),
+                },
+                Op::Forget { uid: u1 },
+            ],
+            diagnostics: vec![
+                Diagnostic::Unreadable {
+                    side: Side::Fastmail,
+                    href: Href::from("/f/bad.vcf"),
+                    etag: ETag::from("b1"),
+                    error: VCardError::MissingUid,
+                },
+                Diagnostic::DuplicateUid {
+                    side: Side::ICloud,
+                    uid: Uid::from("u2"),
+                    hrefs: vec![Href::from("/i/a.vcf"), Href::from("/i/b.vcf")],
+                },
+                Diagnostic::UidChanged {
+                    side: Side::Fastmail,
+                    href: Href::from("/f/u3.vcf"),
+                    etag: ETag::from("f9"),
+                    stored: Uid::from("u3"),
+                    found: Uid::from("u4"),
+                },
+                Diagnostic::UnreadTarget {
+                    side: Side::ICloud,
+                    uid: Uid::from("u5"),
+                    target: res("/i/u5.vcf", "i5"),
+                },
+            ],
+        };
+
+        let rendered = plan.to_string();
+
+        assert!(!rendered.contains("jane@example.com"), "card content leaked: {rendered}");
+        insta::assert_snapshot!(rendered, @r"
+        create fastmail uid=u1 from=/i/u1.vcf
+        update fastmail uid=u1 /f/u1.vcf@f1 photo-kept
+        delete icloud uid=u1 /i/u1.vcf@i1
+        conflict(sync) icloud wins uid=u1 → fastmail /f/u1.vcf@f2
+        resurrect icloud uid=u1 from=/f/u1.vcf
+        adopt uid=u1 icloud=/i/u1.vcf@i1 fastmail=/f/u1.vcf@f1
+        refresh uid=u1 icloud=/i/u1.vcf@i2 content
+        forget uid=u1
+        ! unreadable fastmail /f/bad.vcf@b1: vCard has no UID
+        ! duplicate uid=u2 on icloud: /i/a.vcf, /i/b.vcf
+        ! uid changed on fastmail /f/u3.vcf@f9: u3 → u4
+        ! unread target icloud uid=u5 /i/u5.vcf@i5
+        ");
+    }
+
+    #[test]
+    fn log_op_names_only_server_writes() {
+        let u1 = Uid::from("u1");
+        assert_eq!(
+            Op::Delete {
+                uid: u1.clone(),
+                on: Side::ICloud,
+                target: res("/i/u1.vcf", "i1")
+            }
+            .log_op(),
+            Some("remove")
+        );
+        assert_eq!(Op::Forget { uid: u1.clone() }.log_op(), None);
+        assert_eq!(
+            Op::Refresh {
+                uid: u1.clone(),
+                icloud: None,
+                fastmail: None,
+                synced: None
+            }
+            .log_op(),
+            None
+        );
+        assert_eq!(
+            Op::Resurrect {
+                uid: u1.clone(),
+                to: Side::ICloud,
+                source: res("/f/u1.vcf", "f1"),
+                synced: plain("u1")
+            }
+            .log_op(),
+            Some("add")
+        );
+        assert_eq!(Op::Forget { uid: u1.clone() }.uid(), &u1);
+    }
+
+    #[test]
+    fn for_push_drops_the_source_photo_and_keeps_the_targets() {
+        let source = card_with("u1", "Jane Doe", &format!("NOTE:new\r\n{URI_PHOTO}"));
+        let target = card_with("u1", "Jane Doe", EMBEDDED_PHOTO);
+
+        let pushed = SyncedCard::for_push(&source, Some(&target));
+
+        let recorded = card_with("u1", "Jane Doe", "NOTE:new\r\n");
+        assert_eq!(pushed.card, recorded);
+        assert_eq!(pushed.content_hash, source.canonical_hash(SYNC_HASH));
+        assert_eq!(pushed.put_with_photo, Some(recorded.with_photos_of(&target)));
+        assert_eq!(pushed.body(), &card_with("u1", "Jane Doe", &format!("NOTE:new\r\n{EMBEDDED_PHOTO}")));
+
+        // No target photo, or no target at all: the plain card is PUT.
+        assert_eq!(SyncedCard::for_push(&source, Some(&card("u1", "Jane Doe"))).put_with_photo, None);
+        assert_eq!(SyncedCard::for_push(&source, None).body(), &recorded);
+    }
+}

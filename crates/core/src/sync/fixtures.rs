@@ -1,0 +1,54 @@
+//! Test fixtures for the sync engine. Cards are tiny and PII-free.
+
+use chrono::{DateTime, Utc};
+
+use super::{Resource, SYNC_HASH};
+use crate::{
+    contact::{CANONICAL_VERSION, ETag, Href, VCard},
+    state::{ContactState, SideState},
+};
+
+/// An embedded photo line, as Fastmail stores photos.
+pub(crate) const EMBEDDED_PHOTO: &str = "PHOTO;ENCODING=b;TYPE=JPEG:QUJD\r\n";
+/// A URI photo line, as iCloud stores photos.
+pub(crate) const URI_PHOTO: &str = "PHOTO;VALUE=uri:https://p1-contacts.icloud.com/photo/abc\r\n";
+
+pub(crate) fn card(uid: &str, name: &str) -> VCard {
+    card_with(uid, name, "")
+}
+
+/// A card with extra content lines (each ending in `\r\n`) before `END`.
+pub(crate) fn card_with(uid: &str, name: &str, body: &str) -> VCard {
+    VCard::parse(format!("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:{uid}\r\nFN:{name}\r\n{body}END:VCARD\r\n")).expect("fixture card parses")
+}
+
+pub(crate) fn res(href: &str, etag: &str) -> Resource {
+    Resource {
+        href: Href::from(href),
+        etag: ETag::from(etag),
+    }
+}
+
+/// A state row for `synced` (photo-less fixture cards), current hash version.
+pub(crate) fn row(id: u64, synced: &VCard, icloud: (&str, &str), fastmail: (&str, &str)) -> ContactState {
+    let at = DateTime::<Utc>::UNIX_EPOCH;
+    let side = |(href, etag): (&str, &str)| SideState {
+        href: Href::from(href),
+        etag: ETag::from(etag),
+        last_seen_at: at,
+    };
+    ContactState {
+        id,
+        version: 1,
+        uid: synced.uid().clone(),
+        icloud: side(icloud),
+        fastmail: side(fastmail),
+        content_hash: synced.canonical_hash(SYNC_HASH),
+        hash_version: CANONICAL_VERSION,
+        photo_stripped: false,
+        last_synced_vcard: synced.clone(),
+        last_synced_at: at,
+        created_at: at,
+        updated_at: at,
+    }
+}
