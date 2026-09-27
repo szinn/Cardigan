@@ -91,6 +91,10 @@ pub enum FailureReason {
     Unauthorized,
     /// The server rejected the card or request for another reason.
     Rejected,
+    /// One UID at several hrefs on one side; none of them is synced.
+    DuplicateUid,
+    /// The card at a synced href now carries another UID.
+    UidChanged,
     /// Any other error (for example a state-store failure).
     Internal,
 }
@@ -107,6 +111,8 @@ impl FailureReason {
             Self::Transient => "transient",
             Self::Unauthorized => "unauthorized",
             Self::Rejected => "rejected",
+            Self::DuplicateUid => "duplicate_uid",
+            Self::UidChanged => "uid_changed",
             Self::Internal => "internal",
         }
     }
@@ -125,6 +131,8 @@ impl FromStr for FailureReason {
             "transient" => Ok(Self::Transient),
             "unauthorized" => Ok(Self::Unauthorized),
             "rejected" => Ok(Self::Rejected),
+            "duplicate_uid" => Ok(Self::DuplicateUid),
+            "uid_changed" => Ok(Self::UidChanged),
             "internal" => Ok(Self::Internal),
             _ => Err(format!("unknown failure reason `{s}`")),
         }
@@ -247,6 +255,8 @@ mod tests {
             FailureReason::Transient,
             FailureReason::Unauthorized,
             FailureReason::Rejected,
+            FailureReason::DuplicateUid,
+            FailureReason::UidChanged,
             FailureReason::Internal,
         ] {
             assert_eq!(reason.as_str().parse::<FailureReason>(), Ok(reason));

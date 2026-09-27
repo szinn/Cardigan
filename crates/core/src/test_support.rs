@@ -13,6 +13,10 @@ use crate::{
     contact::{ETag, Href},
 };
 
+mod state;
+
+pub use state::InMemoryState;
+
 /// Prefix of the sync tokens the fake issues; the rest is a version number.
 const TOKEN_PREFIX: &str = "mem-sync-";
 
