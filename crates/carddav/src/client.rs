@@ -186,6 +186,13 @@ impl HttpClient {
         let started = Instant::now();
         let response = builder.send().await.map_err(|e| transport_error(&context, &e))?;
         let status = response.status();
+        if status == StatusCode::UNAUTHORIZED {
+            tracing::warn!(
+                host = request.url.host_str().unwrap_or_default(),
+                request = %context,
+                "CardDAV server rejected the credentials; check this account's app-specific password"
+            );
+        }
         let headers = response.headers().clone();
         let body = response.bytes().await.map_err(|e| transport_error(&context, &e))?.to_vec();
         tracing::debug!(
