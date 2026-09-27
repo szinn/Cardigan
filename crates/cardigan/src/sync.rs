@@ -15,9 +15,11 @@ use tokio_graceful_shutdown::{IntoSubsystem, SubsystemBuilder, SubsystemHandle, 
 use tokio_util::sync::CancellationToken;
 
 /// How long `Toplevel` waits for the in-flight cycle after a shutdown signal.
-/// Matches Docker's default stop grace period; a cycle cut off here is safe,
-/// because the next cycle adopts whatever it already wrote.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Stays under Docker's default 10s stop grace period (and launchd's default
+/// 20s ExitTimeOut), so the timed-out path can still close the database
+/// before SIGKILL; a cycle cut off here is safe, because the next cycle
+/// adopts whatever it already wrote.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// One sync cycle.
 #[async_trait::async_trait]
@@ -60,14 +62,22 @@ pub async fn run_loop(runner: Arc<dyn CycleRunner>, poll_interval: Duration, res
         let started = Instant::now();
         match runner.run_cycle(CycleRequest { mode: CycleMode::Sync, reset }).await {
             // The SyncService has already logged why; try again next tick.
+            // A `--reset` cycle clears state before planning, so in practice
+            // only non-reset cycles are blocked; keeping `reset` here is the
+            // loop's general policy.
             Ok(CycleOutcome::Blocked(_)) => {}
             Ok(_) => reset = false,
             Err(e) => {
-                tracing::error!(error = %format_args!("{e:#}"), "Sync cycle failed; retrying next interval");
                 if let Some(delay) = retry_after(&e) {
                     let next = (started + poll_interval).max(Instant::now() + delay);
                     interval.reset_at(next);
-                    tracing::info!(retry_after_secs = delay.as_secs(), "Rate limited; delaying the next cycle");
+                    tracing::error!(
+                        error = %format_args!("{e:#}"),
+                        retry_after_secs = delay.as_secs(),
+                        "Sync cycle rate limited; delaying the next cycle"
+                    );
+                } else {
+                    tracing::error!(error = %format_args!("{e:#}"), "Sync cycle failed; retrying next interval");
                 }
             }
         }
