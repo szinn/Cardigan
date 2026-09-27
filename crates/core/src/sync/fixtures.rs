@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 
-use super::{Resource, SYNC_HASH};
+use super::{Entry, Resource, SYNC_HASH, Snapshot};
 use crate::{
     contact::{CANONICAL_VERSION, ETag, Href, VCard},
     state::{ContactState, SideState},
@@ -51,4 +51,19 @@ pub(crate) fn row(id: u64, synced: &VCard, icloud: (&str, &str), fastmail: (&str
         created_at: at,
         updated_at: at,
     }
+}
+
+pub(crate) fn unchanged(etag: &str) -> Entry {
+    Entry::Unchanged(ETag::from(etag))
+}
+
+pub(crate) fn fetched(etag: &str, card: VCard) -> Entry {
+    Entry::Fetched {
+        etag: ETag::from(etag),
+        card: Ok(card),
+    }
+}
+
+pub(crate) fn snapshot<const N: usize>(entries: [(&str, Entry); N]) -> Snapshot {
+    entries.into_iter().map(|(href, entry)| (Href::from(href), entry)).collect()
 }

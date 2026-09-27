@@ -5,6 +5,7 @@
 #[cfg(test)]
 mod fixtures;
 mod plan;
+mod sides;
 mod snapshot;
 
 pub use plan::{Diagnostic, Op, Plan, Resource, SYNC_HASH, SyncedCard, Unsynced, UnsyncedCard};
