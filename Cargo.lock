@@ -490,6 +490,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cg-carddav",
  "cg-core",
  "cg-database",
  "clap",
@@ -497,6 +498,7 @@ dependencies = [
  "insta",
  "log",
  "mimalloc",
+ "secrecy",
  "serde",
  "thiserror",
  "tokio",
@@ -505,6 +507,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

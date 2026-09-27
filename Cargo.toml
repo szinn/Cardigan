@@ -13,6 +13,7 @@ license = "MIT"
 
 # Internal crates
 cg-core = { path = "crates/core" }
+cg-carddav = { path = "crates/carddav" }
 cg-database = { path = "crates/database" }
 
 # Error handling

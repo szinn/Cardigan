@@ -1,3 +1,4 @@
+pub mod carddav;
 pub mod commands;
 pub mod config;
 pub mod error;
