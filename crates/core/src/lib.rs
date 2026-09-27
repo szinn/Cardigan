@@ -2,6 +2,7 @@ pub mod addressbook;
 pub mod contact;
 pub mod error;
 pub mod repository;
+pub mod service;
 pub mod state;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
