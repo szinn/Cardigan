@@ -12,7 +12,7 @@ use crate::{
     contact::{ETag, Href, Side, VCard},
     state::{CardFailure, ContactState},
     sync::{Entry, Snapshot, fetch_lists},
-    with_read_only_transaction,
+    with_read_only_transaction, with_transaction,
 };
 
 /// What the state store held when the cycle started.
@@ -70,6 +70,11 @@ pub(super) struct Built {
     pub(super) fastmail: Snapshot,
     /// Every `(side, href)` fetched this cycle.
     pub(super) fetched: HashSet<(Side, Href)>,
+    /// Every `(side, href)` held this cycle (I1): its failure group was not
+    /// yet due, so the planner never saw it. `finish`'s Decision-8 sweep
+    /// clears a pre-cycle failure row only when its href is unheld here (the
+    /// planner saw the card, fetched or not, and it did not fail again).
+    pub(super) held: HashSet<(Side, Href)>,
 }
 
 impl Built {
@@ -114,7 +119,10 @@ impl SyncService {
     pub(super) async fn build(&self, listed: &Listed, stored: &Stored, now: DateTime<Utc>) -> Result<Built, Error> {
         let lists = fetch_lists(&listed.icloud.entries, &listed.fastmail.entries, &stored.contacts);
         let held = held_hrefs(listed, &stored.failures, now);
-        let mut built = Built::default();
+        let mut built = Built {
+            held: held.clone(),
+            ..Built::default()
+        };
         built.icloud = self.snapshot(Side::ICloud, &listed.icloud, &lists.icloud, &held, &mut built.fetched).await?;
         built.fastmail = self
             .snapshot(Side::Fastmail, &listed.fastmail, &lists.fastmail, &held, &mut built.fetched)
@@ -164,6 +172,40 @@ impl SyncService {
             snapshot.insert(href.clone(), entry);
         }
         Ok(snapshot)
+    }
+
+    /// Whether the cycle has nothing to do (Decision 7): both sides report
+    /// no change since their stored tokens and no failing card is due. When
+    /// idle, stores the fresh tokens.
+    pub(super) async fn idle(&self, stored: &Stored, collections: &Collections, now: DateTime<Utc>) -> Result<bool, Error> {
+        if stored.failures.iter().any(|failure| now >= failure.next_retry_at) {
+            return Ok(false);
+        }
+        let mut tokens = Vec::new();
+        for side in [Side::ICloud, Side::Fastmail] {
+            let Some(token) = stored.token(side) else {
+                return Ok(false);
+            };
+            if !collections.get(side).supports_sync_collection {
+                return Ok(false);
+            }
+            match self
+                .book(side)
+                .changes_since(Some(token))
+                .await
+                .inspect_err(|error| self.after_listing_error(error))?
+            {
+                Changes::Delta(set) if set.changed.is_empty() && set.removed.is_empty() => tokens.push((side, set.token.into_string())),
+                Changes::Delta(_) | Changes::TokenInvalid => return Ok(false),
+            }
+        }
+        with_transaction!(self, endpoint_repository, |tx| {
+            for (side, token) in tokens {
+                endpoint_repository.set_sync_token(tx, side, Some(token)).await?;
+            }
+            Ok(())
+        })?;
+        Ok(true)
     }
 }
 

@@ -161,6 +161,24 @@ impl Harness {
             other => panic!("expected an applied cycle, got {other:?}"),
         }
     }
+
+    fn token(&self, side: Side) -> Option<String> {
+        self.state
+            .endpoints()
+            .into_iter()
+            .find(|endpoint| endpoint.side == side)
+            .and_then(|endpoint| endpoint.sync_token)
+    }
+
+    /// Syncs until a cycle is idle (at most three cycles).
+    async fn settle(&self) {
+        for _ in 0..3 {
+            if matches!(self.sync().await, CycleOutcome::Idle) {
+                return;
+            }
+        }
+        panic!("did not settle");
+    }
 }
 
 #[tokio::test]
@@ -528,7 +546,19 @@ async fn held_cards_of_one_failed_op_release_together_not_by_each_cards_own_back
     // back to iCloud.
     h.advance(TimeDelta::seconds(61));
     let after_short_backoff = h.applied().await;
-    assert_eq!(after_short_backoff, CycleSummary::default(), "no copy-back while the group is still held");
+    assert_eq!(
+        CycleSummary {
+            persistent_failures: Vec::new(),
+            ..after_short_backoff.clone()
+        },
+        CycleSummary::default(),
+        "no copy-back while the group is still held"
+    );
+    assert_eq!(
+        after_short_backoff.persistent_failures.len(),
+        1,
+        "the icloud source has now reached PERSISTENT_ATTEMPTS and is reported every cycle until it clears"
+    );
     assert!(h.icloud.writes().is_empty(), "never copied back to iCloud");
     assert_eq!(h.fastmail.writes().len(), fastmail_writes, "no retry either, until the whole group is due");
 
@@ -699,4 +729,238 @@ async fn an_identity_pair_with_fastmail_winning_updates_icloud_first() {
     let conflicts = h.state.conflicts();
     assert_eq!((conflicts[0].origin, conflicts[0].winner), (ConflictOrigin::Baseline, Side::Fastmail));
     assert_eq!(h.state.contacts()[0].uid.as_str(), "ic-4");
+}
+
+#[tokio::test]
+async fn a_quiet_cycle_is_idle() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.applied().await;
+    h.applied().await; // lists the daemon's own write once, writes nothing
+    let writes = h.writes();
+
+    assert!(matches!(h.sync().await, CycleOutcome::Idle));
+    assert_eq!(h.writes(), writes);
+}
+
+#[tokio::test]
+async fn an_aborted_cycle_keeps_the_previous_tokens() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.settle().await;
+    let token = h.token(Side::ICloud);
+    h.icloud.external_put("/card/bob.vcf", vcard("u2", "Bob Roe", ""));
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Transient("reset".into()));
+
+    h.run(CycleMode::Sync, false).await.unwrap_err();
+
+    assert_eq!(h.token(Side::ICloud), token);
+    assert_eq!(h.applied().await.to_fastmail.added, 1, "the next cycle still sees the new card");
+}
+
+#[tokio::test]
+async fn an_expired_token_falls_back_to_a_full_listing() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    h.settle().await;
+    h.icloud.expire_tokens();
+
+    assert_eq!(h.applied().await, CycleSummary::default());
+    assert!(matches!(h.sync().await, CycleOutcome::Idle));
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn skips_are_stored_every_cycle() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/sam.vcf", vcard("ic-5", "Sam Poe", "EMAIL:sam@one.example\r\n"));
+    h.fastmail.external_put("/dav/sam.vcf", vcard("fm-5", "Sam Poe", "EMAIL:sam@two.example\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.skipped, 2);
+    assert_eq!(h.state.skips().len(), 2);
+    assert_eq!(h.writes(), 0, "never guessed");
+
+    h.fastmail.external_delete(&href("/dav/sam.vcf"));
+    let summary = h.applied().await;
+    assert!(h.state.skips().is_empty());
+    assert_eq!(summary.to_fastmail.added, 1, "now unique, so copied");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_failure_for_a_card_that_is_gone_is_cleared() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud
+        .external_put("/card/bad.vcf", "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEND:VCARD\r\n");
+    h.applied().await;
+    assert_eq!(h.state.failures().len(), 1);
+
+    h.icloud.external_delete(&href("/card/bad.vcf"));
+    h.applied().await;
+
+    assert!(h.state.failures().is_empty());
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_synced_cards_row_clears_once_its_duplicate_is_gone() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.icloud.external_put("/card/u1-dup.vcf", vcard("u1", "Jane Doe", ""));
+
+    h.applied().await;
+    let failures = h.state.failures();
+    assert_eq!(failures.len(), 2, "the synced href and the duplicate are both held");
+    assert!(
+        failures
+            .iter()
+            .all(|failure| failure.side == Side::ICloud && failure.uid.as_ref().map(Uid::as_str) == Some("u1")),
+        "{failures:?}"
+    );
+
+    h.icloud.external_delete(&href("/card/u1-dup.vcf"));
+    h.advance(TimeDelta::seconds(61));
+    h.applied().await;
+
+    assert!(
+        h.state.failures().is_empty(),
+        "the synced href sits unchanged at its own href forever; it must still clear once the group is released"
+    );
+    h.settle().await;
+}
+
+#[tokio::test]
+#[allow(
+    clippy::assert_is_empty,
+    reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"
+)]
+async fn a_card_failing_three_times_is_persistent() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", ""));
+    for _ in 0..3 {
+        h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400".into()));
+    }
+
+    assert!(h.applied().await.persistent_failures.is_empty());
+    h.advance(TimeDelta::seconds(61));
+    assert!(h.applied().await.persistent_failures.is_empty());
+    h.advance(TimeDelta::seconds(121));
+    let summary = h.applied().await;
+
+    assert_eq!(summary.persistent_failures.len(), 1);
+    assert_eq!(summary.persistent_failures[0].attempts, PERSISTENT_ATTEMPTS);
+}
+
+#[tokio::test]
+async fn reset_rebaselines_and_keeps_the_conflict_history() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", "NOTE:icloud\r\n"));
+    h.fastmail.external_put("/dav/jane.vcf", vcard("u1", "Jane Doe", "NOTE:fastmail\r\n"));
+    h.applied().await;
+    let writes = h.writes();
+
+    let CycleOutcome::Applied(summary) = h.run(CycleMode::Sync, true).await.unwrap() else {
+        panic!("expected an applied cycle");
+    };
+
+    assert_eq!(summary.adopted, 1, "both sides already agree");
+    assert_eq!(h.writes(), writes);
+    assert_eq!(h.state.contacts().len(), 1);
+    assert_eq!(h.state.conflicts().len(), 1, "conflict history survives --reset");
+    assert_eq!(h.state.endpoints().len(), 2, "discovery recorded again");
+}
+
+#[tokio::test]
+async fn the_summary_counts_each_direction_and_marks_contacts_seen() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.external_put("/card/a.vcf", vcard("u1", "Ann Lee", ""));
+    h.icloud.external_put("/card/b.vcf", vcard("u2", "Bo Ray", ""));
+    h.fastmail.external_put("/dav/c.vcf", vcard("u3", "Cy Doe", ""));
+
+    let summary = h.applied().await;
+
+    assert_eq!(
+        summary.to_string(),
+        "icloud→fastmail: fetched 2, added 2, updated 0, removed 0, conflicts 0, errors 0; fastmail→icloud: fetched 1, added 1, updated 0, removed 0, \
+         conflicts 0, errors 0; adopted 0, refreshed 0, forgotten 0, state errors 0, deferred 0, skipped 0, persistent failures 0"
+    );
+
+    h.advance(TimeDelta::seconds(600));
+    h.applied().await; // a full cycle: its listing includes the creates
+    assert!(
+        h.state
+            .contacts()
+            .iter()
+            .all(|row| row.icloud.last_seen_at == h.now() && row.fastmail.last_seen_at == h.now())
+    );
+}
+
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn logs_carry_names_but_never_card_content() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let h = Harness::new(Side::ICloud);
+    let secrets = "ORG:Acme\r\nEMAIL:jane@example.com\r\nTEL:+1 555 0100\r\nNOTE:NOTE-TEXT-XYZ\r\n";
+    h.icloud.external_put("/card/jane.vcf", vcard("u1", "Jane Doe", secrets));
+    h.icloud.external_put(
+        "/card/bad.vcf",
+        "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEMAIL:bad@example.com\r\nEND:VCARD\r\n",
+    );
+    h.icloud.external_put("/card/x.vcf", vcard("ic-9", "", "EMAIL:x@example.com\r\n"));
+    h.fastmail
+        .external_put("/dav/x.vcf", vcard("fm-9", "", "EMAIL:x@example.com\r\nTEL:+1 555 0199\r\n"));
+    h.applied().await;
+    h.icloud
+        .external_put("/card/jane.vcf", vcard("u1", "Jane Doe", &format!("{secrets}NOTE:icloud-edit\r\n")));
+    h.fastmail
+        .external_put(minted(FASTMAIL_URL, "u1"), vcard("u1", "Jane Doe", &format!("{secrets}NOTE:fastmail-edit\r\n")));
+    h.applied().await;
+
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains(r#"record="Jane Doe (Acme)" uid=u1 direction=icloud→fastmail op="add""#), "{logs}");
+    assert!(
+        logs.contains(r#"record="Jane Doe (Acme)" uid=u1 direction=icloud→fastmail op="update""#),
+        "the conflict-resolution synced line never fired:\n{logs}"
+    );
+    assert!(logs.contains("conflicts 1"), "the conflict path never ran:\n{logs}");
+    assert!(
+        logs.contains("a contact with no name shares an email or phone with a contact with no name on the other side"),
+        "the nameless-skip warning never fired:\n{logs}"
+    );
+    assert!(logs.contains("sync cycle:"), "{logs}");
+    for secret in ["example.com", "555 01", "NOTE-TEXT-XYZ", "icloud-edit", "fastmail-edit"] {
+        assert!(!logs.contains(secret), "{secret} leaked into the logs:\n{logs}");
+    }
 }

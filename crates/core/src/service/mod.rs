@@ -88,6 +88,9 @@ pub struct CycleRequest {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant, reason = "DryRun is the common case; boxing CyclePlan would only add an indirection")]
 pub enum CycleOutcome {
+    /// Nothing changed on either side and no failing card was due: nothing
+    /// was listed, planned or written.
+    Idle,
     /// Dry-run: the plan a sync would apply. `blocked` is set when the
     /// mass-deletion guard would stop it.
     DryRun { cycle: CyclePlan, blocked: Option<MassDeletion> },
@@ -155,10 +158,16 @@ impl SyncService {
     pub async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error> {
         let now = self.clock.now();
         let dry_run = request.mode == CycleMode::DryRun;
+        if request.reset && !dry_run {
+            self.reset().await?;
+        }
         let collections = self.collections(!dry_run).await?;
         // `dry-run --reset` previews a re-baseline: plan as if the store were
         // empty.
         let stored = if request.reset && dry_run { Stored::default() } else { self.load().await? };
+        if !dry_run && self.idle(&stored, &collections, now).await? {
+            return Ok(CycleOutcome::Idle);
+        }
         let listed = self.list(&collections).await?;
         let built = self.build(&listed, &stored, now).await?;
         let cycle = plan_cycle(&PlanInput {
@@ -215,6 +224,29 @@ impl SyncService {
 
     fn forget_collections(&self) {
         *self.collections.lock().expect(POISONED) = None;
+    }
+
+    /// `--reset`: clears contacts, endpoints, card failures and baseline
+    /// skips, keeps the conflict history, and forces re-discovery so the
+    /// endpoints are recorded again.
+    async fn reset(&self) -> Result<(), Error> {
+        let contacts = with_transaction!(
+            self,
+            contact_state_repository,
+            endpoint_repository,
+            card_failure_repository,
+            baseline_skip_repository,
+            |tx| {
+                let contacts = contact_state_repository.delete_all(tx).await?;
+                endpoint_repository.delete_all(tx).await?;
+                card_failure_repository.delete_all(tx).await?;
+                baseline_skip_repository.delete_all(tx).await?;
+                Ok(contacts)
+            }
+        )?;
+        self.forget_collections();
+        tracing::info!(contacts, "state reset; re-baselining (conflict history kept)");
+        Ok(())
     }
 
     /// A 404/410 or a transport failure while listing may mean the

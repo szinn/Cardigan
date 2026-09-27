@@ -5,15 +5,16 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use super::{
-    Collections, SyncService,
+    Collections, PERSISTENT_ATTEMPTS, SyncService,
     executor::{Written, failed_cards, holds_on_abort, is_cycle_fatal},
     listing::{Built, Listed, Stored},
     summary::{CycleSummary, direction, target_side},
 };
 use crate::{
     Error,
-    contact::{ETag, Href, Side, Uid},
-    state::{ContactState, FailedCard, FailureOp, FailureReason},
+    addressbook::SyncToken,
+    contact::{CANONICAL_VERSION, ETag, Href, Side, Uid},
+    state::{CardFailure, ContactState, FailedCard, FailureOp, FailureReason, NewBaselineSkip},
     sync::{CyclePlan, Diagnostic, Op},
     with_transaction,
 };
@@ -118,7 +119,85 @@ impl SyncService {
                 return Err(error);
             }
         }
+        let failures = self.finish(cycle, stored, built, listed, &run.failed, now).await?;
+        run.summary.skipped = cycle.skips.len();
+        run.summary.persistent_failures = failures.into_iter().filter(|failure| failure.attempts >= PERSISTENT_ATTEMPTS).collect();
+        log_cycle(cycle, &run.summary);
         Ok(run.summary)
+    }
+
+    /// Persists what the cycle learned, in one transaction, once every op
+    /// ran: the latest skips, when each synced card was last listed, failures
+    /// that no longer apply (Decision 8), and the listing's sync tokens.
+    /// Returns every card failure, for the summary.
+    ///
+    /// Decision 8's sweep clears a pre-cycle failure row when the planner
+    /// saw the card this cycle and it did not fail again: either its href is
+    /// no longer listed on its side, or it was not held this cycle
+    /// (`!built.held`, fetched or unchanged both count — a synced card can
+    /// sit unchanged at its own href forever and must still clear once its
+    /// group is released, or `idle` would never see it as resolved).
+    async fn finish(
+        &self,
+        cycle: &CyclePlan,
+        stored: &Stored,
+        built: &Built,
+        listed: &Listed,
+        failed: &HashSet<(Side, Href)>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<CardFailure>, Error> {
+        let skips: Vec<NewBaselineSkip> = cycle
+            .skips
+            .iter()
+            .map(|skip| NewBaselineSkip {
+                side: skip.side,
+                href: skip.resource.href.clone(),
+                uid: skip.uid.clone(),
+                content_hash: skip.content_hash,
+                hash_version: CANONICAL_VERSION,
+                candidate_count: skip.candidate_count,
+                skipped_at: now,
+            })
+            .collect();
+        let seen = |side: Side| -> Vec<Uid> {
+            let listing: HashSet<&Href> = listed.side(side).entries.iter().map(|(href, _)| href).collect();
+            stored
+                .contacts
+                .iter()
+                .filter(|row| listing.contains(&row.side(side).href))
+                .map(|row| row.uid.clone())
+                .collect()
+        };
+        let (seen_icloud, seen_fastmail) = (seen(Side::ICloud), seen(Side::Fastmail));
+        let resolved: Vec<(Side, Href)> = stored
+            .failures
+            .iter()
+            .map(|failure| (failure.side, failure.href.clone()))
+            .filter(|key| !failed.contains(key) && (listed.side(key.0).etag(&key.1).is_none() || !built.held.contains(key)))
+            .collect();
+        let tokens = [
+            (Side::ICloud, listed.icloud.token.clone().map(SyncToken::into_string)),
+            (Side::Fastmail, listed.fastmail.token.clone().map(SyncToken::into_string)),
+        ];
+        with_transaction!(
+            self,
+            baseline_skip_repository,
+            contact_state_repository,
+            card_failure_repository,
+            endpoint_repository,
+            |tx| {
+                baseline_skip_repository.replace_all(tx, skips).await?;
+                contact_state_repository.mark_seen(tx, Side::ICloud, &seen_icloud, now).await?;
+                contact_state_repository.mark_seen(tx, Side::Fastmail, &seen_fastmail, now).await?;
+                for (side, href) in &resolved {
+                    card_failure_repository.clear(tx, *side, href).await?;
+                }
+                for (side, token) in tokens {
+                    endpoint_repository.set_sync_token(tx, side, token).await?;
+                }
+                card_failure_repository.list_all(tx).await
+            }
+        )
     }
 
     async fn record_op_failure(&self, op: &Op, written: &Written, error: &Error, run: &mut Run<'_>, now: DateTime<Utc>) -> Result<(), Error> {
@@ -199,4 +278,45 @@ impl SyncService {
             Ok(())
         })
     }
+}
+
+/// The cycle's log lines beyond the per-op ones (Decision 12).
+fn log_cycle(cycle: &CyclePlan, summary: &CycleSummary) {
+    let report = &cycle.report;
+    let paired =
+        !(report.in_sync.is_empty() && report.conflicts.is_empty() && report.reuid.is_empty() && report.by_identity.is_empty() && report.copies.is_empty());
+    if paired {
+        tracing::info!("baseline pairing:\n{report}");
+    }
+    for skip in &cycle.skips {
+        let record = skip.identity.to_string();
+        if skip.identity.name().is_none() && !skip.candidates.is_empty() {
+            tracing::warn!(
+                record = ?record,
+                uid = %skip.uid,
+                side = %skip.side,
+                "not synced: a contact with no name shares an email or phone with a contact with no name on the other side; name either to sync it"
+            );
+        } else {
+            tracing::warn!(
+                record = ?record,
+                uid = %skip.uid,
+                side = %skip.side,
+                candidates = skip.candidate_count,
+                "not synced: ambiguous match, never guessed; edit either card to resolve"
+            );
+        }
+    }
+    for failure in &summary.persistent_failures {
+        tracing::warn!(
+            side = %failure.side,
+            href = %failure.href,
+            uid = ?failure.uid.as_ref().map(Uid::as_str),
+            op = failure.op.as_str(),
+            reason = failure.reason.as_str(),
+            attempts = failure.attempts,
+            "card keeps failing"
+        );
+    }
+    tracing::info!("sync cycle: {summary}");
 }
