@@ -1,56 +1,54 @@
 //! The sync daemon loop.
 //!
 //! The loop only schedules cycles; what a cycle does is behind [`CycleRunner`],
-//! which CG-9 implements with the core `SyncService`. Until then the binary
-//! uses [`NoopCycleRunner`].
+//! which the core `SyncService` implements.
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use tokio::time::MissedTickBehavior;
+use cg_core::{
+    AddressBookError, Error,
+    service::{CycleMode, CycleOutcome, CycleRequest},
+};
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_graceful_shutdown::{IntoSubsystem, SubsystemBuilder, SubsystemHandle, Toplevel};
 use tokio_util::sync::CancellationToken;
 
 /// How long `Toplevel` waits for the in-flight cycle after a shutdown signal.
+/// Matches Docker's default stop grace period; a cycle cut off here is safe,
+/// because the next cycle adopts whatever it already wrote.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Whether a cycle may write to the servers and the state tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CycleMode {
-    /// Apply the plan.
-    Sync,
-    /// Compute and print the plan; change no server or table data.
-    DryRun,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CycleRequest {
-    pub mode: CycleMode,
-    /// Drop state and re-baseline (in `DryRun`, only preview the re-baseline).
-    pub reset: bool,
-}
-
-/// One sync cycle. Implemented by the core `SyncService` in CG-9.
+/// One sync cycle.
 #[async_trait::async_trait]
 pub trait CycleRunner: Send + Sync {
-    async fn run_cycle(&self, request: CycleRequest) -> anyhow::Result<()>;
+    async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error>;
 }
 
-/// Placeholder runner until CG-9 wires in the `SyncService`.
+/// Placeholder runner until the binary wires in the `SyncService`.
 pub struct NoopCycleRunner;
 
 #[async_trait::async_trait]
 impl CycleRunner for NoopCycleRunner {
-    async fn run_cycle(&self, request: CycleRequest) -> anyhow::Result<()> {
+    async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error> {
         tracing::debug!(mode = ?request.mode, reset = request.reset, "Sync cycle (no-op)");
-        Ok(())
+        Ok(CycleOutcome::Idle)
+    }
+}
+
+/// The server's `Retry-After`, when a cycle failed because it was rate limited.
+fn retry_after(error: &Error) -> Option<Duration> {
+    match error {
+        Error::AddressBook(AddressBookError::RateLimited { retry_after }) => *retry_after,
+        _ => None,
     }
 }
 
 /// Runs a cycle immediately and then every `poll_interval` until `shutdown`
 /// is cancelled. An in-flight cycle always completes before the loop exits.
-/// Failed cycles are logged and retried on the next tick; `reset` stays set
-/// until a cycle succeeds.
+/// Failed cycles are logged and retried on the next tick, or after the
+/// server's `Retry-After` when that is later. `reset` stays set until a cycle
+/// is idle or applied; a cycle the mass-deletion guard blocked keeps it.
 pub async fn run_loop(runner: Arc<dyn CycleRunner>, poll_interval: Duration, reset: bool, shutdown: CancellationToken) {
     let mut interval = tokio::time::interval(poll_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -63,9 +61,19 @@ pub async fn run_loop(runner: Arc<dyn CycleRunner>, poll_interval: Duration, res
             _ = interval.tick() => {}
         }
 
+        let started = Instant::now();
         match runner.run_cycle(CycleRequest { mode: CycleMode::Sync, reset }).await {
-            Ok(()) => reset = false,
-            Err(e) => tracing::error!(error = %format_args!("{e:#}"), "Sync cycle failed; retrying next interval"),
+            // The SyncService has already logged why; try again next tick.
+            Ok(CycleOutcome::Blocked(_)) => {}
+            Ok(_) => reset = false,
+            Err(e) => {
+                tracing::error!(error = %format_args!("{e:#}"), "Sync cycle failed; retrying next interval");
+                if let Some(delay) = retry_after(&e) {
+                    let next = (started + poll_interval).max(Instant::now() + delay);
+                    interval.reset_at(next);
+                    tracing::info!(retry_after_secs = delay.as_secs(), "Rate limited; delaying the next cycle");
+                }
+            }
         }
     }
 
@@ -106,44 +114,57 @@ pub async fn run_daemon(runner: Arc<dyn CycleRunner>, poll_interval: Duration, r
 
 #[cfg(test)]
 mod tests {
-    // `Arc`, `Duration` and `CancellationToken` come from `super::*`; importing
-    // them again trips the workspace `redundant_imports` lint.
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
-    use tokio::time::Instant;
+    // `Instant`, `Error`, `AddressBookError` and `CycleOutcome` come from
+    // `super::*`.
+    use cg_core::{contact::Side, sync::MassDeletion};
 
     use super::*;
 
-    /// Records every request with its start time; optionally sleeps per cycle
-    /// and fails the first `fail_first` calls.
+    /// Records every request with its start time; optionally sleeps per cycle.
+    /// Returns the scripted results in order, then `Idle`.
     #[derive(Default)]
     struct RecordingRunner {
         requests: Mutex<Vec<(Instant, CycleRequest)>>,
         completed: AtomicUsize,
-        fail_first: usize,
+        script: Mutex<VecDeque<Result<CycleOutcome, Error>>>,
         cycle_duration: Duration,
+    }
+
+    impl RecordingRunner {
+        fn scripted(results: impl IntoIterator<Item = Result<CycleOutcome, Error>>) -> Self {
+            Self {
+                script: Mutex::new(results.into_iter().collect()),
+                ..Default::default()
+            }
+        }
     }
 
     #[async_trait::async_trait]
     impl CycleRunner for RecordingRunner {
-        async fn run_cycle(&self, request: CycleRequest) -> anyhow::Result<()> {
-            let call = {
-                let mut requests = self.requests.lock().unwrap();
-                requests.push((Instant::now(), request));
-                requests.len()
-            };
+        async fn run_cycle(&self, request: CycleRequest) -> Result<CycleOutcome, Error> {
+            self.requests.lock().unwrap().push((Instant::now(), request));
             if !self.cycle_duration.is_zero() {
                 tokio::time::sleep(self.cycle_duration).await;
             }
             self.completed.fetch_add(1, Ordering::SeqCst);
-            if call <= self.fail_first {
-                anyhow::bail!("simulated failure {call}");
-            }
-            Ok(())
+            self.script.lock().unwrap().pop_front().unwrap_or(Ok(CycleOutcome::Idle))
         }
+    }
+
+    fn rate_limited(retry_after: Option<Duration>) -> Error {
+        Error::AddressBook(AddressBookError::RateLimited { retry_after })
+    }
+
+    fn starts(cycles: &[(u64, CycleRequest)]) -> Vec<u64> {
+        cycles.iter().map(|(t, _)| *t).collect()
     }
 
     /// Runs the loop for `run_time` of (paused) time, then cancels and waits
@@ -180,10 +201,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn failed_cycle_keeps_loop_running_and_retains_reset() {
-        let runner = Arc::new(RecordingRunner {
-            fail_first: 1,
-            ..Default::default()
-        });
+        let runner = Arc::new(RecordingRunner::scripted([Err(Error::Infrastructure("state store down".into()))]));
         let cycles = run_for(&runner, POLL, true, Duration::from_secs(121)).await;
         assert_eq!(cycles, vec![(0, sync(true)), (60, sync(true)), (120, sync(false))]);
     }
@@ -208,8 +226,60 @@ mod tests {
             ..Default::default()
         });
         let cycles = run_for(&runner, POLL, false, Duration::from_secs(400)).await;
-        let starts: Vec<u64> = cycles.iter().map(|(t, _)| *t).collect();
-        assert_eq!(starts, vec![0, 150, 300]);
+        assert_eq!(starts(&cycles), vec![0, 150, 300]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_cycle_waits_for_retry_after() {
+        let runner = Arc::new(RecordingRunner::scripted([Err(rate_limited(Some(Duration::from_secs(150))))]));
+        let cycles = run_for(&runner, POLL, false, Duration::from_secs(211)).await;
+        assert_eq!(starts(&cycles), vec![0, 150, 210], "next cycle at retry_after, then every poll interval");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_shorter_than_poll_interval_keeps_the_interval() {
+        let runner = Arc::new(RecordingRunner::scripted([Err(rate_limited(Some(Duration::from_secs(30))))]));
+        let cycles = run_for(&runner, POLL, false, Duration::from_secs(121)).await;
+        assert_eq!(starts(&cycles), vec![0, 60, 120]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_without_retry_after_keeps_the_interval() {
+        let runner = Arc::new(RecordingRunner::scripted([Err(rate_limited(None))]));
+        let cycles = run_for(&runner, POLL, false, Duration::from_secs(121)).await;
+        assert_eq!(starts(&cycles), vec![0, 60, 120]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_retry_after_still_stops_on_shutdown() {
+        let runner = Arc::new(RecordingRunner::scripted([Err(rate_limited(Some(Duration::from_hours(24))))]));
+        let start = Instant::now();
+        let cycles = run_for(&runner, POLL, false, Duration::from_secs(100)).await;
+        assert_eq!(starts(&cycles), vec![0]);
+        assert_eq!(start.elapsed().as_secs(), 100, "shutdown must not wait out retry_after");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unauthorized_cycle_keeps_loop_running() {
+        let runner = Arc::new(RecordingRunner::scripted([
+            Err(Error::AddressBook(AddressBookError::Unauthorized)),
+            Err(Error::AddressBook(AddressBookError::Unauthorized)),
+        ]));
+        let cycles = run_for(&runner, POLL, false, Duration::from_secs(121)).await;
+        assert_eq!(starts(&cycles), vec![0, 60, 120], "a rotated password must not need a restart");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_cycle_keeps_reset() {
+        let blocked = MassDeletion {
+            side: Side::Fastmail,
+            deletes: 50,
+            contacts: 100,
+            limit: 20,
+        };
+        let runner = Arc::new(RecordingRunner::scripted([Ok(CycleOutcome::Blocked(blocked))]));
+        let cycles = run_for(&runner, POLL, true, Duration::from_secs(121)).await;
+        assert_eq!(cycles, vec![(0, sync(true)), (60, sync(true)), (120, sync(false))]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -239,13 +309,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noop_runner_succeeds() {
-        NoopCycleRunner
+    async fn noop_runner_is_idle() {
+        let outcome = NoopCycleRunner
             .run_cycle(CycleRequest {
                 mode: CycleMode::DryRun,
                 reset: true,
             })
             .await
             .unwrap();
+        assert!(matches!(outcome, CycleOutcome::Idle));
     }
 }
