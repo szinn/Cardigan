@@ -189,18 +189,21 @@ mod tests {
                 }))
             })
         });
-        book.expect_multiget().returning(|_| {
-            Box::pin(async {
-                Ok(MultigetResult {
-                    found: vec![FetchedCard {
-                        href: Href::from("/c/a.vcf"),
-                        etag: ETag::from("\"1\""),
-                        body: JANE.as_bytes().to_vec(),
-                    }],
-                    missing: vec![Href::from("/c/gone.vcf")],
+        book.expect_multiget()
+            .withf(|hrefs| hrefs == vec![Href::from("/c/a.vcf"), Href::from("/c/gone.vcf")])
+            .times(1)
+            .returning(|_| {
+                Box::pin(async {
+                    Ok(MultigetResult {
+                        found: vec![FetchedCard {
+                            href: Href::from("/c/a.vcf"),
+                            etag: ETag::from("\"1\""),
+                            body: JANE.as_bytes().to_vec(),
+                        }],
+                        missing: vec![Href::from("/c/gone.vcf")],
+                    })
                 })
-            })
-        });
+            });
 
         let dump = collect(Side::ICloud, &book).await.unwrap();
 
@@ -277,5 +280,27 @@ mod tests {
         ignore_broken_pipe(Ok(())).unwrap();
         let error = ignore_broken_pipe(Err(io::Error::from(io::ErrorKind::PermissionDenied))).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        // Test with a Write impl that fails with BrokenPipe, proving write_json
+        // preserves the kind
+        struct BrokenPipeWriter;
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let dump = Dump {
+            target: "icloud",
+            host: HOST.to_owned(),
+            collection: "card".to_owned(),
+            listed_with: ListedWith::SyncCollection,
+            cards: vec![],
+        };
+        let write_result = write_json(&dump, BrokenPipeWriter);
+        assert_eq!(write_result.as_ref().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        ignore_broken_pipe(write_result).unwrap();
     }
 }
