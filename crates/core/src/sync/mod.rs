@@ -5,8 +5,10 @@
 #[cfg(test)]
 mod fixtures;
 mod plan;
+mod planner;
 mod sides;
 mod snapshot;
 
 pub use plan::{Diagnostic, Op, Plan, Resource, SYNC_HASH, SyncedCard, Unsynced, UnsyncedCard};
+pub use planner::{PlanInput, Planned, plan};
 pub use snapshot::{Entry, FetchLists, Snapshot, fetch_lists};

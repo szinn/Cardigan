@@ -26,6 +26,11 @@ pub(crate) struct SideView {
     /// Parsed cards whose UID has no state row, in UID order.
     pub(crate) unsynced: Vec<UnsyncedCard>,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// This side has an entry (unreadable, or held) whose UID the planner
+    /// cannot know, at an href no state row stores here. Such a href might
+    /// hide a synced contact that moved: the planner must not treat a state
+    /// row missing from this side as `Deleted`.
+    pub(crate) uncertain: bool,
 }
 
 impl SideView {
@@ -42,6 +47,8 @@ impl SideView {
                 Entry::Held(_) => {
                     if let Some(uid) = synced_uid {
                         view.held.insert(uid.clone());
+                    } else {
+                        view.uncertain = true;
                     }
                 }
                 Entry::Unchanged(etag) => {
@@ -64,6 +71,8 @@ impl SideView {
                     });
                     if let Some(uid) = synced_uid {
                         view.held.insert(uid.clone());
+                    } else {
+                        view.uncertain = true;
                     }
                 }
                 Entry::Fetched { etag, card: Ok(card) } => match synced_uid {
@@ -239,6 +248,38 @@ mod tests {
                 found: u("u4")
             }]
         );
+    }
+
+    #[test]
+    fn unreadable_at_an_unknown_href_is_uncertain() {
+        let unreadable = Entry::Fetched {
+            etag: ETag::from("m1"),
+            card: Err(VCardError::MissingUid),
+        };
+        let view = classify(&snapshot([("/i/u1.vcf", unchanged("i1")), ("/i/moved.vcf", unreadable)]));
+        assert!(view.uncertain);
+    }
+
+    #[test]
+    fn held_at_an_unknown_href_is_uncertain() {
+        let view = classify(&snapshot([("/i/u1.vcf", unchanged("i1")), ("/i/moved.vcf", Entry::Held(ETag::from("m1")))]));
+        assert!(view.uncertain);
+    }
+
+    #[test]
+    fn unreadable_or_held_at_a_state_href_is_not_uncertain() {
+        let unreadable = || Entry::Fetched {
+            etag: ETag::from("i2"),
+            card: Err(VCardError::MissingUid),
+        };
+        assert!(!classify(&snapshot([("/i/u1.vcf", unreadable())])).uncertain);
+        assert!(!classify(&snapshot([("/i/u1.vcf", Entry::Held(ETag::from("i2")))])).uncertain);
+    }
+
+    #[test]
+    fn a_clean_snapshot_is_not_uncertain() {
+        let view = classify(&snapshot([("/i/u1.vcf", unchanged("i1"))]));
+        assert!(!view.uncertain);
     }
 
     #[test]
