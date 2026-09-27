@@ -1,3 +1,5 @@
+use cg_core::contact::Side;
+
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "Cardigan",
@@ -35,6 +37,27 @@ pub enum Commands {
         #[arg(long, help = "Preview a re-baseline from empty state")]
         reset: bool,
     },
+    #[command(about = "Print every card of one side's address book as JSON, without syncing", display_order = 30)]
+    Dump {
+        #[arg(value_enum, help = "Which service to read")]
+        target: Target,
+    },
+}
+
+/// The service `dump` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Target {
+    Icloud,
+    Fastmail,
+}
+
+impl From<Target> for Side {
+    fn from(target: Target) -> Self {
+        match target {
+            Target::Icloud => Self::ICloud,
+            Target::Fastmail => Self::Fastmail,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +113,31 @@ mod tests {
     #[test]
     fn rejects_positional_arguments() {
         assert_eq!(parse(&["sync", "icloud"]).unwrap_err().kind(), ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn dump_icloud() {
+        assert_eq!(parse(&["dump", "icloud"]).unwrap(), Commands::Dump { target: Target::Icloud });
+    }
+
+    #[test]
+    fn dump_fastmail() {
+        assert_eq!(parse(&["dump", "fastmail"]).unwrap(), Commands::Dump { target: Target::Fastmail });
+    }
+
+    #[test]
+    fn dump_requires_a_target() {
+        assert_eq!(parse(&["dump"]).unwrap_err().kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn dump_rejects_unknown_target() {
+        assert_eq!(parse(&["dump", "gmail"]).unwrap_err().kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn target_maps_to_side() {
+        assert_eq!(Side::from(Target::Icloud), Side::ICloud);
+        assert_eq!(Side::from(Target::Fastmail), Side::Fastmail);
     }
 }

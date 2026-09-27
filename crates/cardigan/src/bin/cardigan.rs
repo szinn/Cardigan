@@ -1,13 +1,15 @@
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use anyhow::Context;
 use cardigan::{
-    commands::{CommandLine, Commands},
+    carddav::build_address_book,
+    commands::{CommandLine, Commands, Target},
     config::Config,
+    dump,
     logging::init_logging,
     sync::{CycleMode, CycleRequest, CycleRunner, NoopCycleRunner, run_daemon},
 };
-use cg_core::{ExternalServicesBuilder, create_services, repository::RepositoryService};
+use cg_core::{ExternalServicesBuilder, contact::Side, create_services, repository::RepositoryService};
 use cg_database::{create_repository_service, open_database};
 
 #[global_allocator]
@@ -16,6 +18,24 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli: CommandLine = clap::Parser::parse();
+    match cli.command {
+        Commands::Dump { target } => run_dump(target).await,
+        command => run_engine(command).await,
+    }
+}
+
+/// `dump` installs no logging, so stdout carries only the JSON, and never
+/// opens the state database.
+async fn run_dump(target: Target) -> anyhow::Result<()> {
+    let config = Config::load().context("Cannot load configuration")?;
+    let side = Side::from(target);
+    let book = build_address_book(side, &config)?;
+    let dump = dump::collect(side, &book).await?;
+    dump::ignore_broken_pipe(dump::write_json(&dump, io::stdout().lock())).context("Couldn't write the dump")
+}
+
+/// `sync` and `dry-run`: logging, the state database and core services.
+async fn run_engine(command: Commands) -> anyhow::Result<()> {
     init_logging()?;
     let config = Config::load().context("Cannot load configuration")?;
 
@@ -31,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     // CG-9 replaces this with the core SyncService.
     let runner: Arc<dyn CycleRunner> = Arc::new(NoopCycleRunner);
 
-    let result = match cli.command {
+    let result = match command {
         Commands::Sync { once: true, reset } => runner.run_cycle(CycleRequest { mode: CycleMode::Sync, reset }).await,
         Commands::Sync { once: false, reset } => run_daemon(runner, config.poll_interval, reset).await,
         Commands::DryRun { reset } => {
@@ -42,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await
         }
+        Commands::Dump { .. } => unreachable!("dump is dispatched before the engine starts"),
     };
 
     match repository_service.repository().close().await.context("Couldn't close database") {
