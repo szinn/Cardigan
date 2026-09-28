@@ -110,3 +110,32 @@ async fn a_listing_larger_than_one_multiget_batch_syncs_every_card() {
 
     assert_eq!(h.uids(Side::Fastmail).await, ["p-0", "p-1", "p-2", "p-3", "p-4"]);
 }
+
+#[tokio::test]
+#[ignore = "needs a docker/colima daemon — run via `mise run integration-tests`"]
+async fn deletes_that_cross_pairs_are_held() {
+    // The 2026-09-27 incident: a nameless ORG-only duplicate and the named
+    // card, each deleted on a different side by a client that merged them.
+    let h = Harness::start().await;
+    let a = h
+        .put(Side::ICloud, "grill-a", &vcard("grill-a", "", "ORG:Harbor Grill\r\nTEL:+1 555 0100\r\n"))
+        .await;
+    h.put(Side::ICloud, "grill-b", &vcard("grill-b", "Harbor Grill", "TEL:+1 555 0100\r\n")).await;
+    h.settle().await;
+    let b_on_fastmail = h
+        .cards(Side::Fastmail)
+        .await
+        .into_iter()
+        .find(|card| card.body.contains("UID:grill-b"))
+        .expect("grill-b reached Fastmail")
+        .href;
+
+    h.remove(Side::ICloud, &a).await;
+    h.remove(Side::Fastmail, &b_on_fastmail).await;
+    h.settle().await;
+
+    assert_eq!(h.uids(Side::ICloud).await, ["grill-b"]);
+    assert_eq!(h.uids(Side::Fastmail).await, ["grill-a"]);
+    assert_eq!(h.contacts().await.len(), 2);
+    assert_eq!(h.failures().await.len(), 0, "no failing card left");
+}
