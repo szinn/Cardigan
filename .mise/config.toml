@@ -32,6 +32,10 @@ depends = ["lint-rust"]
 description = "Lint and format project"
 depends = ["fmt", "lint"]
 
+[tasks.deny]
+description = "Check dependency licenses, advisories, bans and sources"
+run = "cargo deny check"
+
 [tasks.component-tests]
 description = "Run component tests"
 run = "cargo nextest run --workspace --all-features --exclude integration-tests"
