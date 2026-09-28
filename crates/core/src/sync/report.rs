@@ -200,9 +200,10 @@ impl fmt::Display for BaselineReport {
             }
         }
         if !self.held_deletes.is_empty() {
+            writeln!(f, "Held deletes (may be one contact deleted across two pairs):")?;
             writeln!(
                 f,
-                "Held deletes (may be one contact deleted across two pairs; restore a copy to keep it, or delete every remaining copy):"
+                "  Edit the copy you want to keep, or delete every remaining copy. Deleting only one lets the other held delete go through."
             )?;
             for diagnostic in &self.held_deletes {
                 if let Diagnostic::DeleteHeld { on, uid, with, identity } = diagnostic {
@@ -305,7 +306,8 @@ mod tests {
         assert_eq!(report.held, [], "held deletes are not in the Held section");
         insta::assert_snapshot!(report.to_string(), @r"
         in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
-        Held deletes (may be one contact deleted across two pairs; restore a copy to keep it, or delete every remaining copy):
+        Held deletes (may be one contact deleted across two pairs):
+          Edit the copy you want to keep, or delete every remaining copy. Deleting only one lets the other held delete go through.
           <no name> (Harbor Grill) uid=a: delete on fastmail, with uid=b
           Harbor Grill uid=b: delete on icloud, with uid=a
         ");

@@ -336,6 +336,22 @@ mod tests {
     }
 
     #[test]
+    fn different_names_with_the_same_org_and_no_contact_points_may_be_the_same_contact() {
+        let a = card(&["FN:Harbor Grill", "ORG:Acme"]).match_keys();
+        let b = card(&["FN:Acme Front Desk", "ORG:acme"]).match_keys();
+        assert!(a.may_be_same_contact(&b));
+        assert!(b.may_be_same_contact(&a));
+    }
+
+    #[test]
+    fn an_org_on_only_one_card_does_not_match() {
+        let with_org = card(&["FN:Harbor Grill", "ORG:Acme"]).match_keys();
+        let without_org = card(&["FN:Acme Front Desk"]).match_keys();
+        assert!(!with_org.may_be_same_contact(&without_org));
+        assert!(!without_org.may_be_same_contact(&with_org));
+    }
+
+    #[test]
     fn blank_cards_are_never_the_same_contact() {
         let blank = card(&["FN:"]).match_keys();
         assert!(!blank.may_be_same_contact(&card(&["FN:"]).match_keys()));

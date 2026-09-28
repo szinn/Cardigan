@@ -269,7 +269,10 @@ impl SyncService {
                     // UIDs and sides only in `Display` (Decision 12); the
                     // row stays synced, so no card failure.
                     run.summary.held_deletes += 1;
-                    tracing::warn!("{diagnostic}; restore a copy to keep the contact, or delete its remaining copies");
+                    tracing::warn!(
+                        "{diagnostic}; edit the copy you want to keep, or delete every remaining copy (deleting only one lets the other held delete go \
+                         through); run `cardigan dry-run` to see which contact is held"
+                    );
                 }
             }
         }
