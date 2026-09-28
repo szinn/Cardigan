@@ -84,6 +84,9 @@ pub struct BaselineReport {
     /// in any op, so without this the user would have no way to learn a
     /// card isn't syncing.
     pub held: Vec<Diagnostic>,
+    /// Deletes CG-17 held because they may remove one contact across two
+    /// pairs (`Diagnostic::DeleteHeld`).
+    pub held_deletes: Vec<Diagnostic>,
     /// Fastmail-only groups being copied that list a UID pairing replaced
     /// (Decision 7: fixed by hand in v1). A group here may also legitimately
     /// appear under `copies` — this list only flags which of those copies
@@ -151,6 +154,7 @@ impl BaselineReport {
             .filter(|d| matches!(d, Diagnostic::DuplicateUid { .. } | Diagnostic::UidChanged { .. }))
             .cloned()
             .collect();
+        report.held_deletes = diagnostics.iter().filter(|d| matches!(d, Diagnostic::DeleteHeld { .. })).cloned().collect();
         report
     }
 }
@@ -195,6 +199,17 @@ impl fmt::Display for BaselineReport {
                 writeln!(f, "  {diagnostic}")?;
             }
         }
+        if !self.held_deletes.is_empty() {
+            writeln!(
+                f,
+                "Held deletes (may be one contact deleted across two pairs; restore a copy to keep it, or delete every remaining copy):"
+            )?;
+            for diagnostic in &self.held_deletes {
+                if let Diagnostic::DeleteHeld { on, uid, with, identity } = diagnostic {
+                    writeln!(f, "  {identity} uid={uid}: delete on {on}, with uid={with}")?;
+                }
+            }
+        }
         section(
             f,
             "Groups listing re-UID'd members (membership stale until CG-14):",
@@ -217,7 +232,10 @@ fn section<T: fmt::Display>(f: &mut fmt::Formatter<'_>, title: &str, lines: &[T]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contact::{ETag, VCardError};
+    use crate::{
+        contact::{ETag, VCardError},
+        sync::fixtures::card_with,
+    };
 
     #[test]
     fn held_section_lists_duplicate_and_reuid_diagnostics() {
@@ -261,5 +279,35 @@ mod tests {
 
         assert_eq!(report.held, []);
         assert!(!report.to_string().contains("Held"));
+    }
+
+    #[test]
+    fn held_deletes_section_names_the_contact_and_both_uids() {
+        let identity = card_with("b", "Harbor Grill", "EMAIL:hg@example.com\r\n").display_identity();
+        let diagnostics = vec![
+            Diagnostic::DeleteHeld {
+                on: Side::Fastmail,
+                uid: Uid::from("a"),
+                with: Uid::from("b"),
+                identity: card_with("a", "", "ORG:Harbor Grill\r\n").display_identity(),
+            },
+            Diagnostic::DeleteHeld {
+                on: Side::ICloud,
+                uid: Uid::from("b"),
+                with: Uid::from("a"),
+                identity,
+            },
+        ];
+
+        let report = BaselineReport::build(&[], &[], &diagnostics);
+
+        assert_eq!(report.held_deletes.len(), 2);
+        assert_eq!(report.held, [], "held deletes are not in the Held section");
+        insta::assert_snapshot!(report.to_string(), @r"
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+        Held deletes (may be one contact deleted across two pairs; restore a copy to keep it, or delete every remaining copy):
+          <no name> (Harbor Grill) uid=a: delete on fastmail, with uid=b
+          Harbor Grill uid=b: delete on icloud, with uid=a
+        ");
     }
 }

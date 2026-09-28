@@ -259,5 +259,8 @@ mod tests {
 
         assert_eq!(planned.plan.ops, []);
         assert_eq!(planned.plan.diagnostics.len(), 2, "{}", planned.plan);
+        let report = planned.report.to_string();
+        assert!(report.contains("  Harbor Grill uid=b: delete on icloud, with uid=a"), "{report}");
+        assert!(!report.contains("555"), "PII leaked into the report: {report}");
     }
 }
