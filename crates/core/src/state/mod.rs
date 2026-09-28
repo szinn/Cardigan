@@ -1,13 +1,14 @@
 //! Sync state: what the daemon last synced, per contact and per endpoint,
-//! plus the conflict history, failing cards and ambiguous baseline cards.
-//! These traits are the spec's sync-state port; `cg-database` implements
-//! them.
+//! plus the conflict history, failing cards, ambiguous baseline cards and the
+//! Recreate journal. These traits are the spec's sync-state port;
+//! `cg-database` implements them.
 
 mod baseline_skip;
 mod card_failure;
 mod conflict;
 mod contact_state;
 mod endpoint;
+mod pending_recreate;
 
 #[cfg(test)]
 pub(crate) use baseline_skip::MockBaselineSkipRepository;
@@ -24,3 +25,6 @@ pub use contact_state::{ContactState, ContactStateId, ContactStateRepository, Ne
 #[cfg(test)]
 pub(crate) use endpoint::MockEndpointRepository;
 pub use endpoint::{Endpoint, EndpointRepository};
+#[cfg(test)]
+pub(crate) use pending_recreate::MockPendingRecreateRepository;
+pub use pending_recreate::{NewPendingRecreate, PendingRecreate, PendingRecreateId, PendingRecreateRepository};

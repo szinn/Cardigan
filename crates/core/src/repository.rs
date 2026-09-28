@@ -4,7 +4,7 @@ use derive_builder::Builder;
 
 use crate::{
     Error,
-    state::{BaselineSkipRepository, CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository},
+    state::{BaselineSkipRepository, CardFailureRepository, ConflictRepository, ContactStateRepository, EndpointRepository, PendingRecreateRepository},
 };
 
 #[derive(Builder)]
@@ -16,6 +16,7 @@ pub struct RepositoryService {
     conflict_repository: Arc<dyn ConflictRepository>,
     card_failure_repository: Arc<dyn CardFailureRepository>,
     baseline_skip_repository: Arc<dyn BaselineSkipRepository>,
+    pending_recreate_repository: Arc<dyn PendingRecreateRepository>,
 }
 
 impl RepositoryService {
@@ -48,6 +49,11 @@ impl RepositoryService {
     #[must_use]
     pub fn baseline_skip_repository(&self) -> &Arc<dyn BaselineSkipRepository> {
         &self.baseline_skip_repository
+    }
+
+    #[must_use]
+    pub fn pending_recreate_repository(&self) -> &Arc<dyn PendingRecreateRepository> {
+        &self.pending_recreate_repository
     }
 }
 
@@ -178,7 +184,10 @@ pub(crate) mod testing {
     use super::{MockRepository, RepositoryServiceBuilder, Transaction};
     use crate::{
         Error,
-        state::{MockBaselineSkipRepository, MockCardFailureRepository, MockConflictRepository, MockContactStateRepository, MockEndpointRepository},
+        state::{
+            MockBaselineSkipRepository, MockCardFailureRepository, MockConflictRepository, MockContactStateRepository, MockEndpointRepository,
+            MockPendingRecreateRepository,
+        },
     };
 
     /// A no-op transaction for unit tests.
@@ -221,5 +230,6 @@ pub(crate) mod testing {
             .conflict_repository(Arc::new(MockConflictRepository::new()))
             .card_failure_repository(Arc::new(MockCardFailureRepository::new()))
             .baseline_skip_repository(Arc::new(MockBaselineSkipRepository::new()))
+            .pending_recreate_repository(Arc::new(MockPendingRecreateRepository::new()))
     }
 }

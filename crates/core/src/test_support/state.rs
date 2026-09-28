@@ -14,7 +14,8 @@ use crate::{
     repository::{Repository, RepositoryService, RepositoryServiceBuilder, Transaction},
     state::{
         BackoffPolicy, BaselineSkip, BaselineSkipRepository, CardFailure, CardFailureRepository, Conflict, ConflictRepository, ContactState,
-        ContactStateRepository, Endpoint, EndpointRepository, FailedCard, NewBaselineSkip, NewConflict, NewContactState,
+        ContactStateRepository, Endpoint, EndpointRepository, FailedCard, NewBaselineSkip, NewConflict, NewContactState, NewPendingRecreate, PendingRecreate,
+        PendingRecreateRepository,
     },
 };
 
@@ -30,6 +31,7 @@ struct Tables {
     conflicts: Vec<Conflict>,
     failures: Vec<CardFailure>,
     skips: Vec<BaselineSkip>,
+    pending: Vec<PendingRecreate>,
     next_id: u64,
 }
 
@@ -96,6 +98,7 @@ impl InMemoryState {
                 .conflict_repository(self.clone())
                 .card_failure_repository(self.clone())
                 .baseline_skip_repository(self.clone())
+                .pending_recreate_repository(self.clone())
                 .build()
                 .expect("every repository is set"),
         )
@@ -131,6 +134,11 @@ impl InMemoryState {
     #[must_use]
     pub fn skips(&self) -> Vec<BaselineSkip> {
         self.tables().skips.clone()
+    }
+
+    #[must_use]
+    pub fn pending_recreates(&self) -> Vec<PendingRecreate> {
+        self.tables().pending.clone()
     }
 
     fn tables(&self) -> MutexGuard<'_, Tables> {
@@ -330,6 +338,36 @@ impl ConflictRepository for InMemoryState {
 
     async fn list_for_uid(&self, transaction: &dyn Transaction, uid: &Uid) -> Result<Vec<Conflict>, Error> {
         Ok(self.read(transaction)?.conflicts.iter().rev().filter(|row| &row.uid == uid).cloned().collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl PendingRecreateRepository for InMemoryState {
+    async fn upsert(&self, transaction: &dyn Transaction, new: NewPendingRecreate) -> Result<PendingRecreate, Error> {
+        let mut tables = self.write(transaction)?;
+        let row = PendingRecreate {
+            id: tables.next_id(),
+            uid: new.uid,
+            old_fastmail_href: new.old_fastmail_href,
+            old_fastmail_uid: new.old_fastmail_uid,
+            new_fastmail_href: new.new_fastmail_href,
+            card: new.card,
+            created_at: new.created_at,
+        };
+        tables.pending.retain(|pending| pending.uid != row.uid);
+        tables.pending.push(row.clone());
+        Ok(row)
+    }
+
+    async fn list_all(&self, transaction: &dyn Transaction) -> Result<Vec<PendingRecreate>, Error> {
+        Ok(self.read(transaction)?.pending.clone())
+    }
+
+    async fn delete(&self, transaction: &dyn Transaction, uid: &Uid) -> Result<bool, Error> {
+        let mut tables = self.write(transaction)?;
+        let before = tables.pending.len();
+        tables.pending.retain(|pending| &pending.uid != uid);
+        Ok(tables.pending.len() != before)
     }
 }
 
@@ -555,6 +593,56 @@ mod tests {
         })
         .await
         .expect("only the next write fails");
+    }
+
+    fn pending(uid: &str, card: &str) -> NewPendingRecreate {
+        NewPendingRecreate {
+            uid: Uid::from(uid),
+            old_fastmail_href: Href::from(format!("/dav/old-{uid}.vcf")),
+            old_fastmail_uid: Uid::from(format!("fm-{uid}")),
+            new_fastmail_href: Href::from(format!("/dav/{uid}.vcf")),
+            card: card.as_bytes().to_vec(),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_replaces_the_row_for_the_same_uid() {
+        let state = InMemoryState::new();
+        let service = state.repository_service();
+        let repo = service.pending_recreate_repository().clone();
+        crate::repository::transaction(&**service.repository(), |tx| {
+            Box::pin(async move {
+                repo.upsert(tx, pending("a", "first")).await?;
+                repo.upsert(tx, pending("b", "other")).await?;
+                repo.upsert(tx, pending("a", "second")).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let rows = state.pending_recreates();
+        let summary: Vec<(&str, &[u8])> = rows.iter().map(|row| (row.uid.as_str(), row.card.as_slice())).collect();
+        assert_eq!(summary, [("b", b"other".as_slice()), ("a", b"second".as_slice())]);
+    }
+
+    #[tokio::test]
+    async fn delete_reports_whether_a_row_was_removed() {
+        let state = InMemoryState::new();
+        let service = state.repository_service();
+        let repo = service.pending_recreate_repository().clone();
+        let removed = crate::repository::transaction(&**service.repository(), |tx| {
+            Box::pin(async move {
+                repo.upsert(tx, pending("a", "card")).await?;
+                Ok((repo.delete(tx, &Uid::from("a")).await?, repo.delete(tx, &Uid::from("a")).await?))
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(removed, (true, false));
+        assert_eq!(state.pending_recreates(), []);
     }
 
     #[tokio::test]
