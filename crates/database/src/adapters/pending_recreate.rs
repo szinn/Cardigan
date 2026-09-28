@@ -22,6 +22,7 @@ impl From<pending_recreates::Model> for PendingRecreate {
         Self {
             id: model.id as u64,
             uid: Uid::from(model.uid),
+            icloud_href: Href::from(model.icloud_href),
             old_fastmail_href: Href::from(model.old_fastmail_href),
             old_fastmail_uid: Uid::from(model.old_fastmail_uid),
             new_fastmail_href: Href::from(model.new_fastmail_href),
@@ -51,6 +52,7 @@ impl PendingRecreateRepository for PendingRecreateRepositoryAdapter {
         let model = pending_recreates::ActiveModel {
             id: NotSet,
             uid: Set(new.uid.into_string()),
+            icloud_href: Set(new.icloud_href.into_string()),
             old_fastmail_href: Set(new.old_fastmail_href.into_string()),
             old_fastmail_uid: Set(new.old_fastmail_uid.into_string()),
             new_fastmail_href: Set(new.new_fastmail_href.into_string()),
@@ -122,6 +124,7 @@ mod tests {
     fn pending(uid: &str, label: &str, secs: i64) -> NewPendingRecreate {
         NewPendingRecreate {
             uid: Uid::from(uid),
+            icloud_href: Href::from(format!("/i/{uid}.vcf")),
             old_fastmail_href: Href::from(format!("/dav/old-{uid}.vcf")),
             old_fastmail_uid: Uid::from(format!("fm-{uid}")),
             new_fastmail_href: Href::from(format!("/dav/{uid}.vcf")),
@@ -140,6 +143,7 @@ mod tests {
 
         assert_eq!(repo.list_all(&*tx).await.unwrap().as_slice(), std::slice::from_ref(&added));
         assert_eq!(added.uid, Uid::from("u1"));
+        assert_eq!(added.icloud_href, Href::from("/i/u1.vcf"));
         assert_eq!(added.old_fastmail_href, Href::from("/dav/old-u1.vcf"));
         assert_eq!(added.old_fastmail_uid, Uid::from("fm-u1"));
         assert_eq!(added.new_fastmail_href, Href::from("/dav/u1.vcf"));

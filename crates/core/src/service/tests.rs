@@ -3,10 +3,13 @@
 
 use super::{href::mint_href, *};
 use crate::{
-    addressbook::Precondition,
+    addressbook::{Changes, Precondition},
     contact::{CANONICAL_VERSION, Href, Uid, VCard},
     repository::transaction,
-    state::{CardFailureRepository, ConflictOrigin, ContactStateRepository, FailedCard, FailureOp, FailureReason, NewContactState, SideState},
+    state::{
+        CardFailureRepository, ConflictOrigin, ContactStateRepository, EndpointRepository, FailedCard, FailureOp, FailureReason, NewContactState,
+        NewPendingRecreate, PendingRecreateRepository, SideState,
+    },
     sync::SyncedCard,
     test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp, Write},
 };
@@ -1118,4 +1121,155 @@ async fn dry_run_leaves_the_journal_alone() {
 
     assert_eq!(h.fastmail.writes().len(), writes_before, "dry-run writes nothing");
     assert_eq!(h.state.pending_recreates().len(), 1);
+}
+
+#[tokio::test]
+async fn a_contact_deleted_on_icloud_during_the_crash_window_stays_deleted() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    interrupt_after_the_delete(&h).await;
+
+    // The user deletes the contact on iCloud during the crash window, before
+    // the daemon gets a chance to finish the interrupted Recreate.
+    h.icloud.external_delete(&href("/card/ann.vcf"));
+
+    h.applied().await;
+
+    assert!(
+        h.fastmail.card(&minted(FASTMAIL_URL, "ic-1")).is_none(),
+        "the contact must not be resurrected on Fastmail"
+    );
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_none(), "the old card stays gone");
+    assert_eq!(h.state.pending_recreates(), []);
+    assert_eq!(h.icloud.writes(), [], "nothing was written back to iCloud");
+}
+
+/// Simulates a crash between the Fastmail PUT succeeding and the state write
+/// that would have deleted the journal row and adopted the pair. There is no
+/// way to fail only that specific write with `fail_next_write` (it fails
+/// whichever state write comes next, and the journal upsert comes first), so
+/// this lets a Recreate complete for real and then reconstructs the
+/// mid-crash state directly: the journal row is put back with the bytes
+/// that were actually written, and the `ContactState` row `write_state`
+/// would have added is removed again, while the books are left exactly as
+/// the real PUT left them.
+#[tokio::test]
+async fn a_crash_after_the_new_card_put_drops_the_row_and_adopts() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.applied().await;
+    assert_eq!(h.state.pending_recreates(), []);
+    assert_eq!(h.state.contacts().len(), 1);
+
+    let new_href = minted(FASTMAIL_URL, "ic-1");
+    let card = h.fastmail.card(&new_href).expect("the recreate wrote the new card").1;
+    let uid = Uid::from("ic-1");
+    let (store, now) = (h.state.clone(), h.now());
+    transaction(&*h.state, move |tx| {
+        Box::pin(async move {
+            ContactStateRepository::delete_by_uid(&*store, tx, &uid).await?;
+            PendingRecreateRepository::upsert(
+                &*store,
+                tx,
+                NewPendingRecreate {
+                    uid,
+                    icloud_href: href("/card/ann.vcf"),
+                    old_fastmail_href: href("/dav/ann.vcf"),
+                    old_fastmail_uid: Uid::from("fm-1"),
+                    new_fastmail_href: new_href,
+                    card,
+                    created_at: now,
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    })
+    .await
+    .unwrap();
+
+    let puts_before = h.fastmail.writes().iter().filter(|write| matches!(write, Write::Put { .. })).count();
+
+    h.applied().await;
+
+    assert_eq!(h.state.pending_recreates(), [], "replay drops the row: the new href is already listed");
+    let puts_after = h.fastmail.writes().iter().filter(|write| matches!(write, Write::Put { .. })).count();
+    assert_eq!(puts_after, puts_before, "no second Fastmail PUT this cycle");
+    assert_eq!(h.state.contacts().len(), 1, "the pair is adopted back to one row");
+}
+
+/// Advances `side`'s stored sync token to match its current listing, as if
+/// an earlier cycle had already seen it. Used to build a state that a real
+/// cycle could never produce on its own: this test needs both sides' tokens
+/// fresh (so `idle`'s own listing check is quiet) while a pending Recreate
+/// still needs its fallback. In practice the same cycle that leaves tokens
+/// fresh always also runs the fallback (Decision 7's guard forces it to), so
+/// the only way to isolate the guard is to fabricate that combination
+/// directly rather than drive it through `SyncService`.
+async fn advance_token(h: &Harness, side: Side) {
+    let Changes::Delta(set) = h.book(side).changes_since(None).await.unwrap() else {
+        panic!("a full listing is never TokenInvalid");
+    };
+    let store = h.state.clone();
+    transaction(&*h.state, move |tx| {
+        Box::pin(async move { EndpointRepository::set_sync_token(&*store, tx, side, Some(set.token.into_string())).await })
+    })
+    .await
+    .unwrap();
+}
+
+/// The literal scenario from the CG-16 review request — seed the content
+/// pair, `interrupt_after_the_delete`, fail the replay PUT non-fatally, sync
+/// again — turns out to pass even with the `idle` guard deleted: the tokens
+/// stored before the interrupted (aborted) cycle are already stale relative
+/// to the delete it performed, so `idle`'s own listing check already forces
+/// a non-idle cycle, independent of the guard. To actually exercise the
+/// guard, both sides' tokens must already be fresh when the critical cycle
+/// starts, with nothing left for a plain listing comparison to notice; only
+/// the leftover pending row hints that Fastmail still needs its fallback
+/// copy. That combination is built directly here (see `advance_token`)
+/// rather than through two real interrupted cycles.
+#[tokio::test]
+async fn a_pending_row_keeps_the_cycle_from_going_idle() {
+    let h = Harness::new(Side::ICloud);
+    h.applied().await; // discovers both sides and stores empty-book tokens
+
+    h.icloud.external_put(href("/card/ann.vcf"), vcard("ic-1", "Ann Lee", ""));
+    advance_token(&h, Side::ICloud).await;
+
+    let (store, now) = (h.state.clone(), h.now());
+    transaction(&*h.state, move |tx| {
+        Box::pin(async move {
+            PendingRecreateRepository::upsert(
+                &*store,
+                tx,
+                NewPendingRecreate {
+                    uid: Uid::from("ic-1"),
+                    icloud_href: href("/card/ann.vcf"),
+                    old_fastmail_href: href("/dav/gone.vcf"),
+                    old_fastmail_uid: Uid::from("fm-1"),
+                    new_fastmail_href: minted(FASTMAIL_URL, "ic-1"),
+                    card: vcard("ic-1", "Ann Lee", PHOTO).into_bytes(),
+                    created_at: now,
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    })
+    .await
+    .unwrap();
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400 bad request".into()));
+
+    h.applied().await;
+
+    let (_, body) = h
+        .fastmail
+        .card(&minted(FASTMAIL_URL, "ic-1"))
+        .expect("fallback: pairing copied the iCloud card to the minted href");
+    let body = String::from_utf8(body).unwrap();
+    assert!(
+        body.contains("UID:ic-1") && !body.contains("PHOTO"),
+        "the iCloud copy, not the journaled bytes: {body}"
+    );
 }

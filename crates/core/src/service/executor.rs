@@ -143,6 +143,7 @@ impl SyncService {
                 let new_href = mint_href(&collections.fastmail.addressbook_url, uid);
                 self.journal_recreate(NewPendingRecreate {
                     uid: uid.clone(),
+                    icloud_href: icloud.href.clone(),
                     old_fastmail_href: old_fastmail.href.clone(),
                     old_fastmail_uid: fastmail_uid.clone(),
                     new_fastmail_href: new_href.clone(),

@@ -18,6 +18,10 @@ pub struct PendingRecreate {
     pub id: PendingRecreateId,
     /// The contact's UID after the Recreate (the iCloud card's UID).
     pub uid: Uid,
+    /// The iCloud card's href; replay drops the row without a PUT when this
+    /// is no longer listed on iCloud (the user deleted it during the crash
+    /// window), rather than resurrecting it on Fastmail.
+    pub icloud_href: Href,
     pub old_fastmail_href: Href,
     /// The UID the old Fastmail card carried.
     pub old_fastmail_uid: Uid,
@@ -34,6 +38,7 @@ impl fmt::Debug for PendingRecreate {
         f.debug_struct("PendingRecreate")
             .field("id", &self.id)
             .field("uid", &self.uid)
+            .field("icloud_href", &self.icloud_href)
             .field("old_fastmail_href", &self.old_fastmail_href)
             .field("old_fastmail_uid", &self.old_fastmail_uid)
             .field("new_fastmail_href", &self.new_fastmail_href)
@@ -47,6 +52,7 @@ impl fmt::Debug for PendingRecreate {
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewPendingRecreate {
     pub uid: Uid,
+    pub icloud_href: Href,
     pub old_fastmail_href: Href,
     pub old_fastmail_uid: Uid,
     pub new_fastmail_href: Href,
@@ -58,6 +64,7 @@ impl fmt::Debug for NewPendingRecreate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NewPendingRecreate")
             .field("uid", &self.uid)
+            .field("icloud_href", &self.icloud_href)
             .field("old_fastmail_href", &self.old_fastmail_href)
             .field("old_fastmail_uid", &self.old_fastmail_uid)
             .field("new_fastmail_href", &self.new_fastmail_href)
@@ -92,6 +99,7 @@ mod tests {
         let pending = PendingRecreate {
             id: 7,
             uid: Uid::from("ic-1"),
+            icloud_href: Href::from("/card/ic-1.vcf"),
             old_fastmail_href: Href::from("/dav/old.vcf"),
             old_fastmail_uid: Uid::from("fm-1"),
             new_fastmail_href: Href::from("/dav/new.vcf"),
@@ -104,6 +112,7 @@ mod tests {
 
         let new = NewPendingRecreate {
             uid: pending.uid.clone(),
+            icloud_href: pending.icloud_href.clone(),
             old_fastmail_href: pending.old_fastmail_href.clone(),
             old_fastmail_uid: pending.old_fastmail_uid.clone(),
             new_fastmail_href: pending.new_fastmail_href.clone(),

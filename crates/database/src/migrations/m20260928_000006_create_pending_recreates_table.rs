@@ -17,6 +17,7 @@ impl MigrationTrait for Migration {
                     .col(pk_auto(PendingRecreates::Id))
                     // One pending Recreate per contact: upsert replaces it.
                     .col(text(PendingRecreates::Uid).unique_key())
+                    .col(text(PendingRecreates::IcloudHref))
                     .col(text(PendingRecreates::OldFastmailHref))
                     .col(text(PendingRecreates::OldFastmailUid))
                     .col(text(PendingRecreates::NewFastmailHref))
@@ -37,6 +38,7 @@ pub(crate) enum PendingRecreates {
     Table,
     Id,
     Uid,
+    IcloudHref,
     OldFastmailHref,
     OldFastmailUid,
     NewFastmailHref,

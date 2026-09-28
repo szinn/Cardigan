@@ -17,6 +17,7 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub uid: String,
+    pub icloud_href: String,
     pub old_fastmail_href: String,
     pub old_fastmail_uid: String,
     pub new_fastmail_href: String,

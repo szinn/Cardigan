@@ -348,6 +348,7 @@ impl PendingRecreateRepository for InMemoryState {
         let row = PendingRecreate {
             id: tables.next_id(),
             uid: new.uid,
+            icloud_href: new.icloud_href,
             old_fastmail_href: new.old_fastmail_href,
             old_fastmail_uid: new.old_fastmail_uid,
             new_fastmail_href: new.new_fastmail_href,
@@ -598,6 +599,7 @@ mod tests {
     fn pending(uid: &str, card: &str) -> NewPendingRecreate {
         NewPendingRecreate {
             uid: Uid::from(uid),
+            icloud_href: Href::from(format!("/i/{uid}.vcf")),
             old_fastmail_href: Href::from(format!("/dav/old-{uid}.vcf")),
             old_fastmail_uid: Uid::from(format!("fm-{uid}")),
             new_fastmail_href: Href::from(format!("/dav/{uid}.vcf")),
