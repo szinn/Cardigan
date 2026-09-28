@@ -10,21 +10,9 @@ mod contact_state;
 mod endpoint;
 mod pending_recreate;
 
-#[cfg(test)]
-pub(crate) use baseline_skip::MockBaselineSkipRepository;
 pub use baseline_skip::{BaselineSkip, BaselineSkipId, BaselineSkipRepository, NewBaselineSkip};
-#[cfg(test)]
-pub(crate) use card_failure::MockCardFailureRepository;
 pub use card_failure::{BackoffPolicy, CardFailure, CardFailureId, CardFailureRepository, FailedCard, FailureOp, FailureReason};
-#[cfg(test)]
-pub(crate) use conflict::MockConflictRepository;
 pub use conflict::{Conflict, ConflictId, ConflictOrigin, ConflictRepository, NewConflict};
-#[cfg(test)]
-pub(crate) use contact_state::MockContactStateRepository;
 pub use contact_state::{ContactState, ContactStateId, ContactStateRepository, NewContactState, SideState};
-#[cfg(test)]
-pub(crate) use endpoint::MockEndpointRepository;
 pub use endpoint::{Endpoint, EndpointRepository};
-#[cfg(test)]
-pub(crate) use pending_recreate::MockPendingRecreateRepository;
 pub use pending_recreate::{NewPendingRecreate, PendingRecreate, PendingRecreateId, PendingRecreateRepository};

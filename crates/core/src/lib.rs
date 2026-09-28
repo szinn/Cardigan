@@ -25,13 +25,20 @@ pub struct ExternalServices {
     pub(crate) repository_service: Arc<RepositoryService>,
 }
 
-pub struct CoreServices {}
+pub struct CoreServices {
+    repository_service: Arc<RepositoryService>,
+}
 
 impl CoreServices {
     pub(crate) fn new(external: ExternalServices) -> Self {
         let ExternalServices { repository_service } = external;
 
-        Self {}
+        Self { repository_service }
+    }
+
+    #[must_use]
+    pub fn repository_service(&self) -> &Arc<RepositoryService> {
+        &self.repository_service
     }
 }
 
