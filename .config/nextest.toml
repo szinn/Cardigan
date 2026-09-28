@@ -1,0 +1,2 @@
+[profile.integration]
+slow-timeout = { period = "30s", terminate-after = 4 }

@@ -24,7 +24,10 @@ async fn a_card_edited_between_listing_and_put_is_resolved_as_a_conflict() {
     ));
 
     let outcome = h.cycle().await.expect("a 412 is not cycle-fatal");
-    assert!(matches!(outcome, CycleOutcome::Applied(_)));
+    let CycleOutcome::Applied(summary) = outcome else {
+        panic!("expected an applied cycle");
+    };
+    assert_eq!(summary.to_fastmail.errors, 1, "the engine's PUT hit a real 412");
     h.settle().await;
 
     let fastmail = h.cards(Side::Fastmail).await;

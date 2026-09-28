@@ -38,7 +38,7 @@ run = "cargo nextest run --workspace --all-features --exclude integration-tests"
 
 [tasks.integration-tests]
 description = "Run the Radicale integration tests (needs a running docker/colima daemon)"
-run = "cargo nextest run -p integration-tests --run-ignored all"
+run = "cargo nextest run -p integration-tests --run-ignored all --profile integration"
 
 [tasks.doc-tests]
 description = "Run document tests"

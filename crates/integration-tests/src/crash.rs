@@ -15,6 +15,8 @@ async fn assert_converged(h: &Harness, uid: &str) {
     assert_eq!(h.uids(Side::Fastmail).await, [uid], "one Fastmail card");
     assert_eq!(h.contacts().await.len(), 1);
     assert_eq!(h.pending().await.len(), 0, "no journal row left");
+    assert_eq!(h.conflicts().await.len(), 0, "no spurious conflict");
+    assert_eq!(h.failures().await.len(), 0, "no failing card left");
 }
 
 #[tokio::test]
@@ -29,6 +31,8 @@ async fn a_crash_after_a_create_converges_without_a_duplicate() {
     h.restart().await;
     h.settle().await;
 
+    assert_eq!(h.icloud.writes(), 0, "the restarted engine recognised the write that already landed");
+    assert_eq!(h.fastmail.writes(), 0, "the restarted engine recognised the write that already landed");
     assert_converged(&h, "ann-1").await;
 }
 
@@ -45,6 +49,8 @@ async fn a_crash_after_an_update_converges() {
     h.restart().await;
     h.settle().await;
 
+    assert_eq!(h.icloud.writes(), 0, "the restarted engine recognised the write that already landed");
+    assert_eq!(h.fastmail.writes(), 0, "the restarted engine recognised the write that already landed");
     assert_converged(&h, "ann-1").await;
     assert!(h.cards(Side::Fastmail).await[0].body.contains("ann@new.example"));
 }
@@ -64,6 +70,8 @@ async fn a_crash_after_the_recreate_delete_is_finished_from_the_journal() {
     h.restart().await;
     h.settle().await;
 
+    assert_eq!(h.icloud.writes(), 0, "the restarted engine recognised the write that already landed");
+    assert_eq!(h.fastmail.writes(), 1, "the restarted engine replays the recreate PUT from the journal");
     assert_converged(&h, "ic-1").await;
     assert!(
         h.cards(Side::Fastmail).await[0].body.contains("PHOTO"),
@@ -85,6 +93,8 @@ async fn a_crash_after_the_recreate_put_clears_the_journal_and_adopts() {
     h.restart().await;
     h.settle().await;
 
+    assert_eq!(h.icloud.writes(), 0, "the restarted engine recognised the write that already landed");
+    assert_eq!(h.fastmail.writes(), 0, "the restarted engine recognised the write that already landed");
     assert_converged(&h, "ic-1").await;
 }
 
@@ -96,7 +106,11 @@ async fn a_lost_response_after_a_create_converges_without_a_duplicate() {
     h.fastmail.fault_after_next(Write::Put, Fault::LostResponse);
 
     h.cycle().await.expect_err("a lost response aborts the cycle");
+    h.icloud.reset_counts();
+    h.fastmail.reset_counts();
     h.settle().await;
 
+    assert_eq!(h.icloud.writes(), 0, "the retried engine recognised the write that already landed");
+    assert_eq!(h.fastmail.writes(), 0, "the retried engine recognised the write that already landed");
     assert_converged(&h, "ann-1").await;
 }

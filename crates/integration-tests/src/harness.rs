@@ -11,7 +11,7 @@ use cg_core::{
     contact::{Href, Side},
     repository::{RepositoryService, read_only_transaction, transaction},
     service::{CycleMode, CycleOutcome, CycleRequest, SyncConfig, SyncService},
-    state::{Conflict, ContactState, PendingRecreate},
+    state::{CardFailure, Conflict, ContactState, PendingRecreate},
 };
 use cg_database::{create_repository_service, open_database};
 use chrono::TimeDelta;
@@ -49,6 +49,20 @@ fn uid_of(body: &str) -> String {
         .expect("every test card has a UID")
         .trim()
         .to_owned()
+}
+
+/// A short, card-content-free label for a settle-loop panic message.
+/// `CycleSummary`'s `Display` (used for `Applied`) and `MassDeletion`'s
+/// `Display` (used for `Blocked`) carry counts only, never card bodies.
+/// `DryRun` never occurs in sync mode, but its `CyclePlan` may carry card
+/// content, so it prints only the variant name.
+fn outcome_label(outcome: &CycleOutcome) -> String {
+    match outcome {
+        CycleOutcome::Idle => "Idle".to_owned(),
+        CycleOutcome::DryRun { .. } => "DryRun".to_owned(),
+        CycleOutcome::Blocked(blocked) => format!("Blocked({blocked})"),
+        CycleOutcome::Applied(summary) => format!("Applied({summary})"),
+    }
 }
 
 fn collection(side: Side) -> &'static str {
@@ -131,6 +145,13 @@ impl Harness {
 
     /// Like `start`, with at most `batch` hrefs per multiget REPORT.
     pub(crate) async fn start_with_batch(batch: usize) -> Self {
+        // Several tests share a process only under `cargo test`; nextest runs
+        // one test per process, so `try_init` (not `init`) avoids a panic on
+        // the second call. Run with `RUST_LOG=cg_core=debug` to see logs.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
         let radicale = Radicale::start().await;
         let db_dir = tempfile::tempdir().expect("temp dir");
         let db_url = format!("sqlite://{}?mode=rwc", db_dir.path().join("cardigan.db").display());
@@ -190,12 +211,16 @@ impl Harness {
     /// writes may still be `Applied` with no writes, because the server
     /// reports those writes as changes.
     pub(crate) async fn settle(&self) {
+        let mut outcomes = Vec::new();
         for _ in 0..6 {
-            if matches!(self.cycle().await.expect("cycle while settling"), CycleOutcome::Idle) {
+            let outcome = self.cycle().await.expect("cycle while settling");
+            let idle = matches!(outcome, CycleOutcome::Idle);
+            outcomes.push(outcome_label(&outcome));
+            if idle {
                 return;
             }
         }
-        panic!("did not settle to Idle within 6 cycles");
+        panic!("did not settle to Idle within 6 cycles: {outcomes:?}");
     }
 
     /// Runs a cycle that must panic (an armed `Fault::Crash`).
@@ -292,6 +317,15 @@ impl Harness {
         })
         .await
         .expect("list conflicts")
+    }
+
+    pub(crate) async fn failures(&self) -> Vec<CardFailure> {
+        let repository = self.repository_service.card_failure_repository().clone();
+        read_only_transaction(&**self.repository_service.repository(), |tx| {
+            Box::pin(async move { repository.list_all(tx).await })
+        })
+        .await
+        .expect("list card failures")
     }
 
     /// The stored sync token for `side`.

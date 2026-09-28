@@ -52,25 +52,28 @@ impl Radicale {
 
     /// Polls `PROPFIND /` for up to 30 s (a readiness probe, not a log line).
     async fn wait_ready(&self) {
+        let mut last = "no attempt made".to_owned();
         for _ in 0..60 {
-            let response = self
+            match self
                 .http
                 .request(method(b"PROPFIND"), self.base_url.clone())
                 .basic_auth(USER, Some(PASSWORD))
                 .header("Depth", "0")
                 .send()
-                .await;
-            if response.is_ok_and(|response| response.status() == StatusCode::MULTI_STATUS) {
-                return;
+                .await
+            {
+                Ok(response) if response.status() == StatusCode::MULTI_STATUS => return,
+                Ok(response) => last = format!("status {}", response.status()),
+                Err(error) => last = format!("error {error}"),
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        panic!("radicale did not answer PROPFIND / within 30 s");
+        panic!("radicale did not answer PROPFIND / within 30 s; last attempt: {last}");
     }
 
     async fn create_addressbook(&self, name: &str) {
         let url = self.base_url.join(&format!("{USER}/{name}/")).expect("collection url");
-        let status = self
+        let response = self
             .http
             .request(method(b"MKCOL"), url)
             .basic_auth(USER, Some(PASSWORD))
@@ -78,9 +81,12 @@ impl Radicale {
             .body(MKCOL_ADDRESSBOOK)
             .send()
             .await
-            .expect("MKCOL request")
-            .status();
-        assert_eq!(status, StatusCode::CREATED, "MKCOL {name}");
+            .expect("MKCOL request");
+        let status = response.status();
+        if status != StatusCode::CREATED {
+            let body_len = response.text().await.map_or(0, |body| body.len());
+            panic!("MKCOL {name}: status {status}, body length {body_len}");
+        }
     }
 }
 
