@@ -56,12 +56,10 @@ impl FaultyBook {
     }
 
     /// PUTs and DELETEs attempted since the last reset.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fn writes(&self) -> usize {
         self.puts.load(Ordering::SeqCst) + self.deletes.load(Ordering::SeqCst)
     }
 
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fn reset_counts(&self) {
         self.puts.store(0, Ordering::SeqCst);
         self.deletes.store(0, Ordering::SeqCst);

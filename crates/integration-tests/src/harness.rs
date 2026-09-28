@@ -34,7 +34,6 @@ const SYNC: CycleRequest = CycleRequest {
 /// One card as the server holds it.
 #[derive(Debug, Clone)]
 pub(crate) struct Card {
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) href: Href,
     pub(crate) body: String,
 }
@@ -74,7 +73,6 @@ fn book(radicale: &Radicale, side: Side, batch: usize) -> CardDavAddressBook {
 }
 
 /// Fetches `href`'s current ETag, then replaces it (`If-Match`).
-#[allow(dead_code, reason = "used by later scenarios")]
 async fn edit_card(book: Arc<CardDavAddressBook>, href: Href, body: String) {
     let current = book.multiget(std::slice::from_ref(&href)).await.expect("control multiget");
     let etag = current.found.into_iter().next().expect("card to edit exists").etag;
@@ -123,9 +121,7 @@ pub(crate) struct Harness {
     clock: Arc<SettableClock>,
     control_icloud: Arc<CardDavAddressBook>,
     control_fastmail: Arc<CardDavAddressBook>,
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) icloud: Arc<FaultyBook>,
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fastmail: Arc<FaultyBook>,
     repository_service: Arc<RepositoryService>,
     service: Arc<SyncService>,
@@ -236,7 +232,6 @@ impl Harness {
     }
 
     /// A user's edit of an existing card.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn edit(&self, side: Side, href: &Href, body: &str) {
         edit_card(self.control(side).clone(), href.clone(), body.to_owned()).await;
     }
@@ -249,7 +244,6 @@ impl Harness {
     }
 
     /// A user's delete.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn remove(&self, side: Side, href: &Href) {
         self.control(side).delete(href, None).await.expect("control delete");
     }
@@ -288,7 +282,6 @@ impl Harness {
         .expect("list contact state")
     }
 
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn pending(&self) -> Vec<PendingRecreate> {
         let repository = self.repository_service.pending_recreate_repository().clone();
         read_only_transaction(&**self.repository_service.repository(), |tx| {
