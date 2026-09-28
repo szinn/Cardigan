@@ -223,10 +223,11 @@ impl SyncService {
     }
 
     /// Unreadable, duplicate and UID-changed cards become card failures;
-    /// deferred rows are only counted and warned about. Recorded diagnostics
-    /// are logged with structured fields, never the `Diagnostic`'s own
-    /// `Display` (Decision 12): `Unreadable` interpolates the `VCardError`,
-    /// and `UnsupportedVersion` carries the card's own `VERSION` text (I3).
+    /// deferred rows and held deletes are only counted and warned about.
+    /// Recorded diagnostics are logged with structured fields, never the
+    /// `Diagnostic`'s own `Display` (Decision 12): `Unreadable`
+    /// interpolates the `VCardError`, and `UnsupportedVersion` carries the
+    /// card's own `VERSION` text (I3).
     async fn record_diagnostics(&self, diagnostics: &[Diagnostic], listed: &Listed, run: &mut Run<'_>, now: DateTime<Utc>) -> Result<(), Error> {
         let mut cards = Vec::new();
         for diagnostic in diagnostics {
@@ -263,6 +264,12 @@ impl SyncService {
                     // `Display` (Decision 12), so it may be logged directly.
                     run.summary.deferred += 1;
                     tracing::warn!("deferred to a later cycle: {diagnostic}");
+                }
+                Diagnostic::DeleteHeld { .. } => {
+                    // UIDs and sides only in `Display` (Decision 12); the
+                    // row stays synced, so no card failure.
+                    run.summary.held_deletes += 1;
+                    tracing::warn!("{diagnostic}; restore a copy to keep the contact, or delete its remaining copies");
                 }
             }
         }

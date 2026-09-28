@@ -42,6 +42,9 @@ pub struct CycleSummary {
     /// Rows the planner left for a later cycle (`UnreadTarget`,
     /// `DeletionDeferred`).
     pub deferred: usize,
+    /// Deletes held because they may remove one contact across two pairs
+    /// (`DeleteHeld`, CG-17).
+    pub held_deletes: usize,
     /// Ambiguous baseline cards left unsynced this cycle.
     pub skipped: usize,
     /// Cards that failed `PERSISTENT_ATTEMPTS` or more times in a row.
@@ -112,8 +115,8 @@ impl fmt::Display for CycleSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "icloud→fastmail: {}; fastmail→icloud: {}; adopted {}, refreshed {}, forgotten {}, state errors {}, deferred {}, skipped {}, persistent failures \
-             {}",
+            "icloud→fastmail: {}; fastmail→icloud: {}; adopted {}, refreshed {}, forgotten {}, state errors {}, deferred {}, held deletes {}, skipped {}, \
+             persistent failures {}",
             self.to_fastmail,
             self.to_icloud,
             self.adopted,
@@ -121,6 +124,7 @@ impl fmt::Display for CycleSummary {
             self.forgotten,
             self.state_errors,
             self.deferred,
+            self.held_deletes,
             self.skipped,
             self.persistent_failures.len()
         )
@@ -162,7 +166,7 @@ mod tests {
             ..CycleSummary::default()
         };
 
-        insta::assert_snapshot!(summary.to_string(), @"icloud→fastmail: fetched 0, added 2, updated 0, removed 0, conflicts 0, errors 0; fastmail→icloud: fetched 0, added 0, updated 0, removed 0, conflicts 0, errors 1; adopted 1, refreshed 0, forgotten 0, state errors 0, deferred 0, skipped 0, persistent failures 0");
+        insta::assert_snapshot!(summary.to_string(), @"icloud→fastmail: fetched 0, added 2, updated 0, removed 0, conflicts 0, errors 0; fastmail→icloud: fetched 0, added 0, updated 0, removed 0, conflicts 0, errors 1; adopted 1, refreshed 0, forgotten 0, state errors 0, deferred 0, held deletes 0, skipped 0, persistent failures 0");
         assert_eq!(direction(Side::ICloud), "fastmail→icloud");
     }
 }

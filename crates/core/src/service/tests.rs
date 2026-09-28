@@ -896,7 +896,7 @@ async fn the_summary_counts_each_direction_and_marks_contacts_seen() {
     assert_eq!(
         summary.to_string(),
         "icloud→fastmail: fetched 2, added 2, updated 0, removed 0, conflicts 0, errors 0; fastmail→icloud: fetched 1, added 1, updated 0, removed 0, \
-         conflicts 0, errors 0; adopted 0, refreshed 0, forgotten 0, state errors 0, deferred 0, skipped 0, persistent failures 0"
+         conflicts 0, errors 0; adopted 0, refreshed 0, forgotten 0, state errors 0, deferred 0, held deletes 0, skipped 0, persistent failures 0"
     );
 
     h.advance(TimeDelta::seconds(600));

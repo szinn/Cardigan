@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    contact::{CardHash, ETag, HashOptions, Href, Side, Uid, VCard, VCardError},
+    contact::{CardHash, DisplayIdentity, ETag, HashOptions, Href, Side, Uid, VCard, VCardError},
     state::ConflictOrigin,
 };
 
@@ -317,6 +317,14 @@ pub enum Diagnostic {
     /// attribute (unreadable, held, or an unattributed `Unchanged`). No op;
     /// CG-8 only counts and warns rather than recording a card failure.
     DeletionDeferred { side: Side, uid: Uid },
+    /// A synced row's `Delete` on `on` was held: another row is being deleted
+    /// on the other side (row `with`), and the two look like the same contact
+    /// (`MatchKeys::may_be_same_contact`). A client that shows both accounts
+    /// merges cards by name, so deleting one merged entry can remove a
+    /// different pair's card on each side (CG-17). No op; CG-8 counts and
+    /// warns. `identity` is for the baseline report only: `Display` prints
+    /// UIDs and sides.
+    DeleteHeld { on: Side, uid: Uid, with: Uid, identity: DisplayIdentity },
 }
 
 impl fmt::Display for Diagnostic {
@@ -336,6 +344,7 @@ impl fmt::Display for Diagnostic {
             } => write!(f, "uid changed on {side} {href}@{etag}: {stored} → {found}"),
             Self::UnreadTarget { side, uid, target } => write!(f, "unread target {side} uid={uid} {target}"),
             Self::DeletionDeferred { side, uid } => write!(f, "deletion deferred on {side} uid={uid}: unreadable card on that side"),
+            Self::DeleteHeld { on, uid, with, .. } => write!(f, "delete held on {on} uid={uid}: may be the same contact as uid={with}"),
         }
     }
 }
@@ -464,12 +473,19 @@ mod tests {
                     side: Side::Fastmail,
                     uid: Uid::from("u6"),
                 },
+                Diagnostic::DeleteHeld {
+                    on: Side::Fastmail,
+                    uid: Uid::from("u7"),
+                    with: Uid::from("u8"),
+                    identity: card_with("u7", "Harbor Grill", "EMAIL:jane@example.com\r\n").display_identity(),
+                },
             ],
         };
 
         let rendered = plan.to_string();
 
         assert!(!rendered.contains("jane@example.com"), "card content leaked: {rendered}");
+        assert!(!rendered.contains("Harbor Grill"), "identity leaked into the plan: {rendered}");
         insta::assert_snapshot!(rendered, @r"
         create fastmail uid=u1 from=/i/u1.vcf
         update fastmail uid=u1 /f/u1.vcf@f1 photo-kept
@@ -484,6 +500,7 @@ mod tests {
         ! uid changed on fastmail /f/u3.vcf@f9: u3 → u4
         ! unread target icloud uid=u5 /i/u5.vcf@i5
         ! deletion deferred on fastmail uid=u6: unreadable card on that side
+        ! delete held on fastmail uid=u7: may be the same contact as uid=u8
         ");
     }
 
