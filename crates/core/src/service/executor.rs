@@ -9,7 +9,7 @@ use crate::{
     AddressBookError, Error,
     addressbook::Precondition,
     contact::{CANONICAL_VERSION, ETag, Href, Side, Uid, VCard},
-    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, SideState},
+    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, NewPendingRecreate, SideState},
     sync::{Op, Resource, SyncedCard},
     with_transaction,
 };
@@ -23,6 +23,8 @@ pub(super) struct StateWrite {
     pub(super) synced: Option<SyncedCard>,
     /// Card failures this op resolves.
     pub(super) clear: Vec<(Side, Href)>,
+    /// Completes a Recreate: removes its journal row in the same transaction.
+    pub(super) recreated: bool,
 }
 
 impl StateWrite {
@@ -40,6 +42,7 @@ impl StateWrite {
             fastmail: Some(fastmail),
             synced: Some(synced.clone()),
             clear,
+            recreated: false,
         }
     }
 }
@@ -106,12 +109,13 @@ impl SyncService {
                 self.write_state(StateWrite::pushed(uid, (loser, resource), source.clone(), synced, clear), now)
                     .await
             }
-            // Op::Recreate's documented order; Task 6 adds the journal before
-            // the DELETE.
+            // Op::Recreate's documented order, with the journal (CG-16)
+            // before the DELETE.
             Op::Recreate {
                 uid,
                 icloud,
                 old_fastmail,
+                fastmail_uid,
                 put_icloud,
                 create_fastmail,
                 synced,
@@ -137,6 +141,15 @@ impl SyncService {
                     None => icloud.clone(),
                 };
                 let new_href = mint_href(&collections.fastmail.addressbook_url, uid);
+                self.journal_recreate(NewPendingRecreate {
+                    uid: uid.clone(),
+                    old_fastmail_href: old_fastmail.href.clone(),
+                    old_fastmail_uid: fastmail_uid.clone(),
+                    new_fastmail_href: new_href.clone(),
+                    card: create_fastmail.as_bytes().to_vec(),
+                    created_at: now,
+                })
+                .await?;
                 self.fastmail.delete(&old_fastmail.href, Some(&old_fastmail.etag)).await?;
                 let fastmail_now = self
                     .write_card(Side::Fastmail, new_href, create_fastmail, Precondition::IfNoneMatch, written)
@@ -147,6 +160,7 @@ impl SyncService {
                     fastmail: Some(fastmail_now),
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, old_fastmail.href.clone())],
+                    recreated: true,
                 };
                 self.write_state(write, now).await
             }
@@ -157,6 +171,7 @@ impl SyncService {
                     fastmail: Some(fastmail.clone()),
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, fastmail.href.clone())],
+                    recreated: false,
                 };
                 self.write_state(write, now).await
             }
@@ -167,6 +182,7 @@ impl SyncService {
                     fastmail: fastmail.clone(),
                     synced: synced.clone(),
                     clear: Vec::new(),
+                    recreated: false,
                 };
                 self.write_state(write, now).await
             }
@@ -207,19 +223,23 @@ impl SyncService {
         reason = "the two arms differ enough (update vs. add, with a None-field guard) that if-let/else reads worse"
     )]
     pub(super) async fn write_state(&self, write: StateWrite, now: DateTime<Utc>) -> Result<(), Error> {
-        with_transaction!(self, contact_state_repository, card_failure_repository, |tx| {
+        with_transaction!(self, contact_state_repository, card_failure_repository, pending_recreate_repository, |tx| {
             let StateWrite {
                 uid,
                 icloud,
                 fastmail,
                 synced,
                 clear,
+                recreated,
             } = write;
             let seen = |resource: Resource| SideState {
                 href: resource.href,
                 etag: resource.etag,
                 last_seen_at: now,
             };
+            if recreated {
+                pending_recreate_repository.delete(tx, &uid).await?;
+            }
             match contact_state_repository.find_by_uid(tx, &uid).await? {
                 Some(mut row) => {
                     if let Some(resource) = icloud {
@@ -266,6 +286,15 @@ impl SyncService {
     /// (Decision 4).
     pub(super) async fn record_conflict(&self, conflict: NewConflict) -> Result<(), Error> {
         with_transaction!(self, conflict_repository, |tx| conflict_repository.add(tx, conflict).await.map(|_| ()))
+    }
+
+    /// Durably records a Recreate's Fastmail card before its old card is
+    /// deleted (CG-8 Decision 11). If this fails, the DELETE never runs.
+    async fn journal_recreate(&self, new: NewPendingRecreate) -> Result<(), Error> {
+        with_transaction!(self, pending_recreate_repository, |tx| pending_recreate_repository
+            .upsert(tx, new)
+            .await
+            .map(|_| ()))
     }
 
     /// Drops the contact's state row and clears the op's failures.

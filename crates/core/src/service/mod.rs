@@ -6,6 +6,7 @@ mod apply;
 mod executor;
 mod href;
 mod listing;
+mod replay;
 mod summary;
 #[cfg(test)]
 mod tests;
@@ -165,6 +166,11 @@ impl SyncService {
         // `dry-run --reset` previews a re-baseline: plan as if the store were
         // empty.
         let stored = if request.reset && dry_run { Stored::default() } else { self.load().await? };
+        // An interrupted Recreate must be finished before pairing sees an
+        // iCloud-only card and copies it (CG-16). Dry-run never replays.
+        if !dry_run && !stored.pending.is_empty() {
+            self.replay(&stored.pending, &collections).await?;
+        }
         if !dry_run && self.idle(&stored, &collections, now).await? {
             return Ok(CycleOutcome::Idle);
         }

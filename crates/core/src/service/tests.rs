@@ -982,3 +982,140 @@ async fn planned_counts_match_what_the_sync_applies() {
     assert_eq!(planned.to_fastmail.added, applied.to_fastmail.added);
     assert_eq!(planned.to_icloud.added, applied.to_icloud.added);
 }
+
+/// Ann Lee on both sides with different UIDs and the same content: a pass-2
+/// pair, so the first sync Recreates the Fastmail card under `ic-1`.
+fn seed_content_pair(h: &Harness, fastmail_extra: &str) {
+    h.icloud.external_put("/card/ann.vcf", vcard("ic-1", "Ann Lee", "EMAIL:ann@example.com\r\n"));
+    h.fastmail
+        .external_put("/dav/ann.vcf", vcard("fm-1", "Ann Lee", &format!("EMAIL:ann@example.com\r\n{fastmail_extra}")));
+}
+
+/// Leaves one journal row: the old Fastmail card deleted, the new one never
+/// written (a transient error on the PUT aborts the cycle).
+async fn interrupt_after_the_delete(h: &Harness) {
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Transient("connection reset".into()));
+    h.run(CycleMode::Sync, false).await.unwrap_err();
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_none(), "the old card was deleted");
+    assert_eq!(h.state.pending_recreates().len(), 1);
+}
+
+#[tokio::test]
+async fn a_recreate_interrupted_after_the_delete_is_finished_from_the_journal() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, PHOTO);
+    interrupt_after_the_delete(&h).await;
+
+    let summary = h.applied().await;
+
+    let fastmail_body = format!("EMAIL:ann@example.com\r\n{PHOTO}");
+    assert_eq!(
+        h.fastmail.card(&minted(FASTMAIL_URL, "ic-1")).unwrap().1,
+        vcard("ic-1", "Ann Lee", &fastmail_body).into_bytes(),
+        "Fastmail keeps its own bytes, photo included"
+    );
+    assert_eq!(summary.adopted, 1);
+    assert_eq!(h.state.pending_recreates(), []);
+    assert_eq!(h.state.contacts().len(), 1);
+    assert!(h.icloud.writes().is_empty(), "the iCloud card was never copied");
+}
+
+#[tokio::test]
+async fn a_journal_entry_is_dropped_when_the_delete_never_happened() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.fastmail.fail_next(BookOp::Delete, AddressBookError::Transient("timeout".into()));
+    h.run(CycleMode::Sync, false).await.unwrap_err();
+    assert_eq!(h.state.pending_recreates().len(), 1);
+
+    h.applied().await;
+
+    assert_eq!(h.state.pending_recreates(), []);
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_none());
+    assert!(h.fastmail.card(&minted(FASTMAIL_URL, "ic-1")).is_some());
+    assert_eq!(h.state.contacts().len(), 1);
+}
+
+#[tokio::test]
+async fn a_completed_recreate_leaves_no_journal() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+
+    h.applied().await;
+
+    assert_eq!(h.state.pending_recreates(), []);
+    assert_eq!(h.state.contacts().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_journal_write_never_deletes_the_old_card() {
+    let h = Harness::new(Side::ICloud);
+    // Discover (and record endpoints) first, so the journal is the next
+    // state write.
+    h.applied().await;
+    seed_content_pair(&h, "");
+    h.state.fail_next_write();
+
+    h.sync().await;
+
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_some(), "the old card must survive");
+    assert!(
+        !h.fastmail.writes().iter().any(|write| matches!(write, Write::Delete { .. })),
+        "no DELETE without a journal row"
+    );
+    assert_eq!(h.state.pending_recreates(), []);
+}
+
+#[tokio::test]
+async fn a_replay_the_server_rejects_falls_back_to_the_icloud_copy() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, PHOTO);
+    interrupt_after_the_delete(&h).await;
+    h.fastmail.fail_next(BookOp::Put, AddressBookError::Permanent("400 bad request".into()));
+
+    // Replay's PUT is rejected (non-fatal): the cycle continues and pairing
+    // copies the iCloud card to the same minted href.
+    h.applied().await;
+    assert_eq!(h.state.pending_recreates().len(), 1, "the row is kept this cycle");
+    let target = minted(FASTMAIL_URL, "ic-1");
+    let (_, body) = h.fastmail.card(&target).expect("fallback: pairing copied the iCloud card to the minted href");
+    let body = String::from_utf8(body).unwrap();
+    assert!(
+        body.contains("UID:ic-1") && !body.contains("PHOTO"),
+        "the iCloud copy, not Fastmail's bytes: {body}"
+    );
+
+    // Next cycle: the new href exists, so the row is dropped.
+    h.sync().await;
+    assert_eq!(h.state.pending_recreates(), []);
+}
+
+#[tokio::test]
+async fn reset_keeps_and_replays_the_journal() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, PHOTO);
+    interrupt_after_the_delete(&h).await;
+
+    let outcome = h.run(CycleMode::Sync, true).await.unwrap();
+
+    assert!(matches!(outcome, CycleOutcome::Applied(_)), "{outcome:?}");
+    let fastmail_body = format!("EMAIL:ann@example.com\r\n{PHOTO}");
+    assert_eq!(
+        h.fastmail.card(&minted(FASTMAIL_URL, "ic-1")).unwrap().1,
+        vcard("ic-1", "Ann Lee", &fastmail_body).into_bytes()
+    );
+    assert_eq!(h.state.pending_recreates(), []);
+}
+
+#[tokio::test]
+async fn dry_run_leaves_the_journal_alone() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    interrupt_after_the_delete(&h).await;
+    let writes_before = h.fastmail.writes().len();
+
+    h.dry_run().await;
+
+    assert_eq!(h.fastmail.writes().len(), writes_before, "dry-run writes nothing");
+    assert_eq!(h.state.pending_recreates().len(), 1);
+}

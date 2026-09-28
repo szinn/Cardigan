@@ -10,7 +10,7 @@ use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, Changes, Collection, FetchedCard, SyncToken},
     contact::{ETag, Href, Side, VCard},
-    state::{CardFailure, ContactState},
+    state::{CardFailure, ContactState, PendingRecreate},
     sync::{Entry, Snapshot, fetch_lists},
     with_read_only_transaction, with_transaction,
 };
@@ -20,6 +20,8 @@ use crate::{
 pub(super) struct Stored {
     pub(super) contacts: Vec<ContactState>,
     pub(super) failures: Vec<CardFailure>,
+    /// Recreates interrupted after their DELETE (CG-16), oldest first.
+    pub(super) pending: Vec<PendingRecreate>,
     pub(super) icloud_token: Option<SyncToken>,
     pub(super) fastmail_token: Option<SyncToken>,
 }
@@ -85,18 +87,27 @@ impl Built {
 
 impl SyncService {
     pub(super) async fn load(&self) -> Result<Stored, Error> {
-        with_read_only_transaction!(self, contact_state_repository, card_failure_repository, endpoint_repository, |tx| {
-            let contacts = contact_state_repository.list_all(tx).await?;
-            let failures = card_failure_repository.list_all(tx).await?;
-            let icloud = endpoint_repository.find(tx, Side::ICloud).await?;
-            let fastmail = endpoint_repository.find(tx, Side::Fastmail).await?;
-            Ok(Stored {
-                contacts,
-                failures,
-                icloud_token: icloud.and_then(|endpoint| endpoint.sync_token).map(SyncToken::from),
-                fastmail_token: fastmail.and_then(|endpoint| endpoint.sync_token).map(SyncToken::from),
-            })
-        })
+        with_read_only_transaction!(
+            self,
+            contact_state_repository,
+            card_failure_repository,
+            endpoint_repository,
+            pending_recreate_repository,
+            |tx| {
+                let contacts = contact_state_repository.list_all(tx).await?;
+                let failures = card_failure_repository.list_all(tx).await?;
+                let pending = pending_recreate_repository.list_all(tx).await?;
+                let icloud = endpoint_repository.find(tx, Side::ICloud).await?;
+                let fastmail = endpoint_repository.find(tx, Side::Fastmail).await?;
+                Ok(Stored {
+                    contacts,
+                    failures,
+                    pending,
+                    icloud_token: icloud.and_then(|endpoint| endpoint.sync_token).map(SyncToken::from),
+                    fastmail_token: fastmail.and_then(|endpoint| endpoint.sync_token).map(SyncToken::from),
+                })
+            }
+        )
     }
 
     /// Both sides' complete membership.
@@ -178,6 +189,9 @@ impl SyncService {
     /// no change since their stored tokens and no failing card is due. When
     /// idle, stores the fresh tokens.
     pub(super) async fn idle(&self, stored: &Stored, collections: &Collections, now: DateTime<Utc>) -> Result<bool, Error> {
+        if !stored.pending.is_empty() {
+            return Ok(false);
+        }
         if stored.failures.iter().any(|failure| now >= failure.next_retry_at) {
             return Ok(false);
         }

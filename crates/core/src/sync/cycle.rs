@@ -188,8 +188,9 @@ mod tests {
         // it. Pure `sync` has no memory of the deleted Fastmail card's own
         // bytes, so pairing copies the iCloud card instead. This is the
         // fallback CG-8 hits only when its durably recorded
-        // `create_fastmail` (Op::Recreate's doc, I2) is missing; normally
-        // CG-8 replays that record and this path never runs.
+        // `create_fastmail` (Op::Recreate's doc, I2) is missing; normally the
+        // service replays that record first (CG-16's journal) and this path
+        // runs only when the server rejects the journaled bytes.
         let icloud = side("i", &[card_with("ic-3", "Ann Lee", "EMAIL:ann@example.com\r\n")]);
 
         let planned = cycle(&icloud, &Snapshot::new(), &[], Side::ICloud);
