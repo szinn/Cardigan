@@ -14,7 +14,7 @@ mod sides;
 mod snapshot;
 
 pub use cycle::{CyclePlan, plan_cycle};
-pub use guard::{DELETE_FLOOR, DELETE_PERCENT, MassDeletion, check_deletions};
+pub use guard::{DELETE_FLOOR, DELETE_PERCENT, MassDeletion, check_deletions, hold_cross_deletes};
 pub use pairing::{Paired, Skip, pair};
 pub use plan::{Diagnostic, Op, PairPass, Plan, RecreateConflict, Resource, SYNC_HASH, SyncedCard, Unsynced, UnsyncedCard};
 pub use planner::{PlanInput, Planned, plan};

@@ -1,4 +1,4 @@
-use super::{BaselineReport, Plan, PlanInput, Planned, Skip, pairing, planner};
+use super::{BaselineReport, Plan, PlanInput, Planned, Skip, guard, pairing, planner};
 
 /// One cycle's complete plan: the planner's ops for synced contacts, then
 /// pairing's for unsynced cards.
@@ -10,11 +10,12 @@ pub struct CyclePlan {
     pub report: BaselineReport,
 }
 
-/// Runs the planner and then pairing. CG-8 calls this every cycle (an empty
-/// state store makes it the initial baseline) and checks
-/// `check_deletions` before writing.
+/// Runs the planner, holds cross-pair deletes (`hold_cross_deletes`), and then
+/// runs pairing. CG-8 calls this every cycle (an empty state store makes it the
+/// initial baseline) and checks `check_deletions` on the result before writing.
 pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     let Planned { mut plan, unsynced } = planner::plan(input);
+    guard::hold_cross_deletes(&mut plan, input.state);
     let paired = pairing::pair(&unsynced, input.winner);
     plan.ops.extend(paired.ops);
     let report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
@@ -237,5 +238,26 @@ mod tests {
         let planned = cycle(&icloud, &fastmail, &state, Side::ICloud);
 
         assert_eq!(render(&planned.plan), "recreate(content) uid=ic-3 fastmail /f/fm-3.vcf@f-fm-3 was fm-3");
+    }
+
+    #[test]
+    fn a_merged_delete_across_two_pairs_is_held() {
+        let a = card_with("a", "", "ORG:Harbor Grill\r\nTEL:+1 555 0100\r\n");
+        let b = card_with("b", "Harbor Grill", "TEL:+1 555 0100\r\n");
+        let state = vec![
+            row(1, &a, ("/i/a.vcf", "i-a"), ("/f/a.vcf", "f-a")),
+            row(2, &b, ("/i/b.vcf", "i-b"), ("/f/b.vcf", "f-b")),
+        ];
+        // a's iCloud card and b's Fastmail card are gone; the others are
+        // unchanged.
+        let mut icloud = Snapshot::new();
+        icloud.insert(Href::from("/i/b.vcf"), unchanged("i-b"));
+        let mut fastmail = Snapshot::new();
+        fastmail.insert(Href::from("/f/a.vcf"), unchanged("f-a"));
+
+        let planned = cycle(&icloud, &fastmail, &state, Side::ICloud);
+
+        assert_eq!(planned.plan.ops, []);
+        assert_eq!(planned.plan.diagnostics.len(), 2, "{}", planned.plan);
     }
 }

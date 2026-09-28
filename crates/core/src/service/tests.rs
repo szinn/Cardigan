@@ -375,6 +375,52 @@ async fn a_deletion_is_propagated_and_a_double_deletion_forgotten() {
 }
 
 #[tokio::test]
+async fn deletes_that_cross_pairs_are_held() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("a", "Harbor Grill").await;
+    h.seed_synced("b", "Harbor Grill").await;
+    h.icloud.external_delete(&href("/card/a.vcf"));
+    h.fastmail.external_delete(&href("/dav/b.vcf"));
+
+    let (cycle, blocked) = h.dry_run().await;
+    assert!(blocked.is_none());
+    assert!(cycle.plan.ops.is_empty(), "{}", cycle.plan);
+    assert_eq!(cycle.plan.diagnostics.len(), 2);
+
+    let summary = h.applied().await;
+    assert_eq!(summary.held_deletes, 2);
+    assert_eq!((summary.to_fastmail.removed, summary.to_icloud.removed), (0, 0));
+    assert_eq!(h.writes(), 0);
+    assert_eq!(h.state.contacts().len(), 2);
+    assert!(h.state.failures().is_empty(), "a held delete is not a card failure");
+
+    // An unrelated change makes the next cycle non-idle: it syncs, and the
+    // hold recurs.
+    h.icloud.external_put("/card/c.vcf", vcard("c", "Cy Doe", ""));
+    let summary = h.applied().await;
+    assert_eq!((summary.held_deletes, summary.to_fastmail.added), (2, 1));
+    assert_eq!(h.state.contacts().len(), 3);
+}
+
+#[tokio::test]
+async fn deleting_the_remaining_copies_releases_a_held_delete() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("a", "Harbor Grill").await;
+    h.seed_synced("b", "Harbor Grill").await;
+    h.icloud.external_delete(&href("/card/a.vcf"));
+    h.fastmail.external_delete(&href("/dav/b.vcf"));
+    assert_eq!(h.applied().await.held_deletes, 2);
+
+    h.fastmail.external_delete(&href("/dav/a.vcf"));
+    h.icloud.external_delete(&href("/card/b.vcf"));
+    let summary = h.applied().await;
+
+    assert_eq!((summary.forgotten, summary.held_deletes), (2, 0));
+    assert_eq!(h.state.contacts().len(), 0);
+    assert_eq!(h.writes(), 0);
+}
+
+#[tokio::test]
 async fn a_missing_put_etag_is_fetched() {
     let h = Harness::new(Side::ICloud);
     h.fastmail.omit_etag_on_put(true);
