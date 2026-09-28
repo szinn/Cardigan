@@ -48,7 +48,9 @@ sqlx = "0.9.0"
 # CardDAV
 httpdate = "1.0.3"
 percent-encoding = "2.3.2"
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "rustls",
+] }
 roxmltree = "0.21.1"
 secrecy = "0.10.3"
 url = "2.5.8"
@@ -66,7 +68,6 @@ tokio-graceful-shutdown = "0.20.0"
 tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
 
 # Utility
-alderkit-token = "0.1.2"
 chrono = { version = "0.4.45", features = ["serde"] }
 derive_builder = "0.20.2"
 sha2 = "0.11.0"
