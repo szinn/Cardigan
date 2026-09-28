@@ -71,6 +71,21 @@ impl MatchKeys {
         !self.emails.is_disjoint(&other.emails) || !self.phones.is_disjoint(&other.phones)
     }
 
+    /// Looser than `is_match`, for the cross-pair delete guard (CG-17): the
+    /// same normalized name, OR a shared email or phone, OR — when neither
+    /// card has any email or phone — the same ORG. A nameless card must match
+    /// its named duplicate by phone or email. A false positive only holds a
+    /// delete, so this errs toward matching.
+    pub fn may_be_same_contact(&self, other: &Self) -> bool {
+        if self.name.is_some() && self.name == other.name {
+            return true;
+        }
+        if self.shares_contact_point(other) {
+            return true;
+        }
+        !self.has_contact_points() && !other.has_contact_points() && self.org.is_some() && self.org == other.org
+    }
+
     /// The normalized full name the heuristic compares (lower-cased,
     /// whitespace collapsed), or `None` when the card has no usable name.
     /// A name may be logged; the other keys may not.
@@ -292,5 +307,40 @@ mod tests {
         let debug = format!("{:?}", card(&["FN:Jane Doe", "EMAIL:jane@example.com", "TEL:+1 555 0100"]).match_keys());
         assert!(!debug.contains("jane"), "{debug}");
         assert!(!debug.contains("555"), "{debug}");
+    }
+
+    #[test]
+    fn same_name_alone_may_be_the_same_contact() {
+        let a = card(&["FN:Harbor Grill", "EMAIL:a@example.com"]).match_keys();
+        let b = card(&["FN:harbor  grill", "EMAIL:b@example.com"]).match_keys();
+        assert!(a.may_be_same_contact(&b));
+        assert!(!a.is_match(&b), "looser than is_match");
+    }
+
+    #[test]
+    fn a_nameless_card_sharing_a_phone_may_be_the_same_contact() {
+        // The CG-17 incident: a nameless ORG-only duplicate and the named card.
+        let nameless = card(&["FN:", "ORG:Harbor Grill", "TEL:+1 555 0100"]).match_keys();
+        let named = card(&["FN:Harbor Grill", "TEL:+1 (555) 0100"]).match_keys();
+        assert!(nameless.may_be_same_contact(&named));
+        assert!(named.may_be_same_contact(&nameless));
+    }
+
+    #[test]
+    fn same_org_counts_only_without_contact_points() {
+        let a = card(&["FN:", "ORG:Acme"]).match_keys();
+        let b = card(&["FN:", "ORG:ACME"]).match_keys();
+        assert!(a.may_be_same_contact(&b));
+        let with_phone = card(&["FN:", "ORG:Acme", "TEL:+1 555 0100"]).match_keys();
+        assert!(!a.may_be_same_contact(&with_phone));
+    }
+
+    #[test]
+    fn blank_cards_are_never_the_same_contact() {
+        let blank = card(&["FN:"]).match_keys();
+        assert!(!blank.may_be_same_contact(&card(&["FN:"]).match_keys()));
+        let a = card(&["FN:Jane Doe", "EMAIL:a@example.com"]).match_keys();
+        let b = card(&["FN:John Roe", "EMAIL:b@example.com"]).match_keys();
+        assert!(!a.may_be_same_contact(&b));
     }
 }
