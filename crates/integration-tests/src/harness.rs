@@ -111,12 +111,9 @@ async fn engine(radicale: &Radicale, db_url: &str, clock: &Arc<SettableClock>, b
 }
 
 pub(crate) struct Harness {
-    #[allow(dead_code, reason = "used by later scenarios (restart)")]
     radicale: Radicale,
     _db_dir: TempDir,
-    #[allow(dead_code, reason = "used by later scenarios (restart)")]
     db_url: String,
-    #[allow(dead_code, reason = "used by later scenarios (restart)")]
     batch: usize,
     clock: Arc<SettableClock>,
     control_icloud: Arc<CardDavAddressBook>,
@@ -166,7 +163,6 @@ impl Harness {
     /// A new process on the same state file: new adapters (with fresh
     /// counters and no armed faults), a new database connection and a new
     /// `SyncService`.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn restart(&mut self) {
         // The old connection may already be unusable after a crash; closing
         // is best effort.
@@ -203,7 +199,6 @@ impl Harness {
     }
 
     /// Runs a cycle that must panic (an armed `Fault::Crash`).
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn crash_cycle(&self) {
         self.clock.advance(TimeDelta::hours(1));
         let service = self.service.clone();

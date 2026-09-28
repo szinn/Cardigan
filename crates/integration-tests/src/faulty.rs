@@ -24,7 +24,6 @@ pub(crate) enum Write {
 
 /// What happens once the real write has reached the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "used by later scenarios")]
 pub(crate) enum Fault {
     /// Panic: the process "dies" and nothing after the write runs.
     Crash,
@@ -66,7 +65,6 @@ impl FaultyBook {
     }
 
     /// The next `write` reaches the server, then `fault` happens.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fn fault_after_next(&self, write: Write, fault: Fault) {
         *self.fault.lock().expect("fault lock") = Some((write, fault));
     }

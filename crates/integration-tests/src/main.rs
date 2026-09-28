@@ -5,6 +5,7 @@
 mod baseline;
 mod clock;
 mod conflict;
+mod crash;
 mod faulty;
 mod harness;
 mod idle;
