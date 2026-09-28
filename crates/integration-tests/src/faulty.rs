@@ -72,7 +72,6 @@ impl FaultyBook {
     }
 
     /// Runs `hook` just before the next PUT is sent.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fn before_next_put(&self, hook: Hook) {
         *self.before_put.lock().expect("hook lock") = Some(hook);
     }

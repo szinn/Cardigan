@@ -237,7 +237,6 @@ impl Harness {
     }
 
     /// The same edit, deferred: for `FaultyBook::before_next_put`.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) fn edit_hook(&self, side: Side, href: Href, body: String) -> Hook {
         let book = self.control(side).clone();
         Box::new(move || Box::pin(edit_card(book, href, body)))
@@ -291,7 +290,6 @@ impl Harness {
         .expect("list pending recreates")
     }
 
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn conflicts(&self) -> Vec<Conflict> {
         let repository = self.repository_service.conflict_repository().clone();
         read_only_transaction(&**self.repository_service.repository(), |tx| {
@@ -302,7 +300,6 @@ impl Harness {
     }
 
     /// The stored sync token for `side`.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn token(&self, side: Side) -> Option<String> {
         let repository = self.repository_service.endpoint_repository().clone();
         read_only_transaction(&**self.repository_service.repository(), |tx| {
@@ -314,7 +311,6 @@ impl Harness {
     }
 
     /// Overwrites the stored sync token for `side`.
-    #[allow(dead_code, reason = "used by later scenarios")]
     pub(crate) async fn set_token(&self, side: Side, token: &str) {
         let repository = self.repository_service.endpoint_repository().clone();
         let token = token.to_owned();
