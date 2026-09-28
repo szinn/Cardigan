@@ -36,6 +36,10 @@ depends = ["fmt", "lint"]
 description = "Run component tests"
 run = "cargo nextest run --workspace --all-features --exclude integration-tests"
 
+[tasks.integration-tests]
+description = "Run the Radicale integration tests (needs a running docker/colima daemon)"
+run = "cargo nextest run -p integration-tests --run-ignored all"
+
 [tasks.doc-tests]
 description = "Run document tests"
 run = "cargo test --doc"

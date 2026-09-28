@@ -1,0 +1,33 @@
+[package]
+name = "integration-tests"
+description = "Cardigan integration tests against a Radicale CardDAV server"
+publish = false
+autotests = false
+autobins = false
+
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[[test]]
+name = "integration"
+path = "src/main.rs"
+
+[dependencies]
+cg-carddav.workspace = true
+cg-core.workspace = true
+cg-database.workspace = true
+
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+testcontainers.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
