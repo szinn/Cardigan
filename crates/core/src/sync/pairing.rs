@@ -14,8 +14,9 @@ pub enum SkipReason {
     Ambiguous,
     /// CG-18: a card with no name that shares an email or phone with a card
     /// the other side already holds (named or not; paired, synced, skipped
-    /// or held). Most likely a duplicate of it, so it is not copied. Report
-    /// only: `baseline_skips` does not record the reason.
+    /// or held), or with a named card on its own side that this same cycle
+    /// copies to the other side. Most likely a duplicate of it, so it is not
+    /// copied. Report only: `baseline_skips` does not record the reason.
     LikelyDuplicate,
 }
 
@@ -396,7 +397,11 @@ fn mutual_pairs(candidates: &[Vec<usize>], fastmail_len: usize) -> Vec<(usize, u
 /// and a copy otherwise; a named card falls back to the name-collision
 /// check. A nameless card with no such collision is also a skip
 /// (`LikelyDuplicate`, CG-18) when it shares an email or phone with any card
-/// in `known`, the other side's cards this cycle; otherwise it is copied.
+/// in `known`, the other side's cards this cycle, or with a named card on
+/// its own side that settles as a copy in this same cycle (that card reaches
+/// the other side this cycle, but `known` does not hold it yet); otherwise it
+/// is copied. Same-side cards that are not being copied (paired, skipped or
+/// already synced) and other nameless cards on the same side never count.
 fn settle_side(
     side: Side,
     cards: &[&UnsyncedCard],
@@ -413,7 +418,7 @@ fn settle_side(
     let nameless_own = nameless_candidates(cards, other);
     let nameless_reverse = nameless_candidates(other, cards);
 
-    cards
+    let mut settled: Vec<Settled> = cards
         .iter()
         .zip(&own)
         .enumerate()
@@ -489,7 +494,48 @@ fn settle_side(
                 reason: SkipReason::Ambiguous,
             })
         })
-        .collect()
+        .collect();
+    skip_same_cycle_duplicates(side, cards, &mut settled);
+    settled
+}
+
+/// CG-18: turns a nameless card's `Copy` into a `LikelyDuplicate` skip when
+/// it shares an email or phone with a named card on the same side that this
+/// cycle also copies. Both would otherwise reach the other side together as
+/// a synced duplicate pair. A shared ORG alone never counts.
+fn skip_same_cycle_duplicates(side: Side, cards: &[&UnsyncedCard], settled: &mut [Settled]) {
+    let copied: Vec<KnownCard> = cards
+        .iter()
+        .zip(settled.iter())
+        .filter(|(card, outcome)| matches!(outcome, Settled::Copy(_)) && card.card.match_keys().name_key().is_some())
+        .map(|(card, _)| KnownCard::of(&card.card))
+        .collect();
+    if copied.is_empty() {
+        return;
+    }
+    for (card, outcome) in cards.iter().zip(settled.iter_mut()) {
+        if !matches!(outcome, Settled::Copy(_)) {
+            continue;
+        }
+        let keys = card.card.match_keys();
+        if keys.name_key().is_some() {
+            continue;
+        }
+        let duplicates: Vec<&KnownCard> = copied.iter().filter(|k| keys.shares_contact_point(&k.keys)).collect();
+        if duplicates.is_empty() {
+            continue;
+        }
+        *outcome = Settled::Skip(Skip {
+            side,
+            resource: card.resource.clone(),
+            uid: card.card.uid().clone(),
+            content_hash: card.card.canonical_hash(SYNC_HASH),
+            candidate_count: u32::try_from(duplicates.len()).unwrap_or(u32::MAX),
+            identity: card.card.display_identity(),
+            candidates: duplicates.iter().map(|k| k.identity.clone()).collect(),
+            reason: SkipReason::LikelyDuplicate,
+        });
+    }
 }
 
 /// For each card in `from` with no usable name, the `to` cards that also
@@ -1083,6 +1129,82 @@ mod tests {
         );
 
         assert_eq!(render(&paired.ops), "create icloud uid=fm-2 from=/f/fm-2.vcf");
+        assert_eq!(paired.skips, []);
+    }
+
+    #[test]
+    fn a_nameless_duplicate_of_a_named_card_copied_this_cycle_is_skipped() {
+        // Both new on Fastmail: the named card is copied, so its nameless
+        // duplicate must not be copied alongside it.
+        let paired = run(
+            vec![],
+            vec![
+                card_with("fm-1", "KW pharmacy", "TEL:+1 555 0100\r\n"),
+                card_with("fm-2", "", "ORG:KW pharmacy\r\nTEL:+1 (555) 0100\r\n"),
+            ],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "create icloud uid=fm-1 from=/f/fm-1.vcf");
+        assert_eq!(skips(&paired), [(Side::Fastmail, "fm-2", SkipReason::LikelyDuplicate)]);
+        let candidates: Vec<String> = paired.skips[0].candidates.iter().map(ToString::to_string).collect();
+        assert_eq!(candidates, ["KW pharmacy"]);
+        assert_eq!(paired.skips[0].candidate_count, 1);
+    }
+
+    #[test]
+    fn a_nameless_duplicate_of_a_named_card_copied_this_cycle_on_icloud_is_skipped() {
+        let paired = run(
+            vec![
+                card_with("ic-1", "KW pharmacy", "TEL:+1 555 0100\r\n"),
+                card_with("ic-2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n"),
+            ],
+            vec![],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "create fastmail uid=ic-1 from=/i/ic-1.vcf");
+        assert_eq!(skips(&paired), [(Side::ICloud, "ic-2", SkipReason::LikelyDuplicate)]);
+        let candidates: Vec<String> = paired.skips[0].candidates.iter().map(ToString::to_string).collect();
+        assert_eq!(candidates, ["KW pharmacy"]);
+    }
+
+    #[test]
+    fn a_skipped_named_card_on_the_same_side_does_not_skip_a_nameless_card() {
+        // The named Fastmail card is a same-name collision (skipped, not
+        // copied), so nothing will reach iCloud for the nameless card to
+        // duplicate.
+        let paired = run(
+            vec![card_with("ic-1", "Sam Poe", "EMAIL:sam@one.example\r\n")],
+            vec![
+                card_with("fm-1", "Sam Poe", "TEL:+1 555 0100\r\n"),
+                card_with("fm-2", "", "ORG:Poe Plumbing\r\nTEL:+1 555 0100\r\n"),
+            ],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "create icloud uid=fm-2 from=/f/fm-2.vcf");
+        assert_eq!(
+            skips(&paired),
+            [(Side::ICloud, "ic-1", SkipReason::Ambiguous), (Side::Fastmail, "fm-1", SkipReason::Ambiguous)]
+        );
+    }
+
+    #[test]
+    fn a_nameless_card_sharing_only_an_org_with_a_named_copy_is_still_copied() {
+        let paired = run(
+            vec![],
+            vec![
+                card_with("fm-1", "KW pharmacy", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n"),
+                card_with("fm-2", "", "ORG:KW pharmacy\r\nNOTE:x\r\n"),
+            ],
+            Side::ICloud,
+        );
+
+        assert_eq!(
+            render(&paired.ops),
+            "create icloud uid=fm-1 from=/f/fm-1.vcf\ncreate icloud uid=fm-2 from=/f/fm-2.vcf"
+        );
         assert_eq!(paired.skips, []);
     }
 
