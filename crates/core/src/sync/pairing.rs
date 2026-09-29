@@ -1,10 +1,23 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{Op, PairPass, RecreateConflict, Resource, SYNC_HASH, SyncedCard, Unsynced, UnsyncedCard};
+use super::{Entry, Op, PairPass, RecreateConflict, Resource, SYNC_HASH, Snapshot, SyncedCard, Unsynced, UnsyncedCard};
 use crate::{
-    contact::{CardHash, ConflictWinner, DisplayIdentity, HashOptions, MatchKeys, Side, Uid},
-    state::ConflictOrigin,
+    contact::{CardHash, ConflictWinner, DisplayIdentity, HashOptions, MatchKeys, Side, Uid, VCard},
+    state::{ConflictOrigin, ContactState},
 };
+
+/// Why pairing left a card alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Several possible matches, or a same-name card with nothing shared
+    /// (passes 2 and 3, and the 2026-09-27 nameless collision).
+    Ambiguous,
+    /// CG-18: a card with no name that shares an email or phone with a card
+    /// the other side already holds (named or not; paired, synced, skipped
+    /// or held). Most likely a duplicate of it, so it is not copied. Report
+    /// only: `baseline_skips` does not record the reason.
+    LikelyDuplicate,
+}
 
 /// A card pairing leaves alone this cycle: it may be the same person as a
 /// card on the other side, but not certainly. Re-evaluated every cycle; CG-8
@@ -31,6 +44,8 @@ pub struct Skip {
     /// decision) the other nameless cards a nameless card shares an email or
     /// phone with.
     pub candidates: Vec<DisplayIdentity>,
+    /// Why the card was skipped.
+    pub reason: SkipReason,
 }
 
 /// What pairing decided this cycle.
@@ -40,11 +55,71 @@ pub struct Paired {
     pub skips: Vec<Skip>,
 }
 
+/// A card one side holds this cycle, reduced to what the likely-duplicate
+/// check needs (CG-18). `keys` holds emails and phone numbers (PII): never
+/// log it.
+#[derive(Debug, Clone)]
+pub struct KnownCard {
+    pub uid: Uid,
+    pub keys: MatchKeys,
+    pub identity: DisplayIdentity,
+}
+
+impl KnownCard {
+    pub fn of(card: &VCard) -> Self {
+        Self {
+            uid: card.uid().clone(),
+            keys: card.match_keys(),
+            identity: card.display_identity(),
+        }
+    }
+}
+
+/// Every card each side holds this cycle: its parsed snapshot entries, then
+/// every synced contact's `last_synced_vcard` (which covers `Unchanged`
+/// entries that were not fetched). `Held` and unreadable entries carry no
+/// card, so they cannot count. One entry per UID; a fetched card wins over
+/// its state row.
+#[derive(Debug, Clone, Default)]
+pub struct KnownCards {
+    pub icloud: Vec<KnownCard>,
+    pub fastmail: Vec<KnownCard>,
+}
+
+impl KnownCards {
+    pub fn collect(icloud: &Snapshot, fastmail: &Snapshot, state: &[ContactState]) -> Self {
+        Self {
+            icloud: known_on(icloud, state),
+            fastmail: known_on(fastmail, state),
+        }
+    }
+
+    fn side(&self, side: Side) -> &[KnownCard] {
+        match side {
+            Side::ICloud => &self.icloud,
+            Side::Fastmail => &self.fastmail,
+        }
+    }
+}
+
+fn known_on(snapshot: &Snapshot, state: &[ContactState]) -> Vec<KnownCard> {
+    let fetched = snapshot.entries().filter_map(|(_, entry)| match entry {
+        Entry::Fetched { card: Ok(card), .. } => Some(card),
+        _ => None,
+    });
+    let mut seen: HashSet<&Uid> = HashSet::new();
+    fetched
+        .chain(state.iter().map(|row| &row.last_synced_vcard))
+        .filter(|card| seen.insert(card.uid()))
+        .map(KnownCard::of)
+        .collect()
+}
+
 /// Pairs both sides' unsynced cards: pass 1 (same UID), pass 2 (same
 /// content), pass 3 (identity heuristic); then copies unique cards and skips
-/// ambiguous ones. Runs every cycle; on an empty state store this is the whole
-/// baseline.
-pub fn pair(unsynced: &Unsynced, winner: ConflictWinner) -> Paired {
+/// ambiguous ones and likely duplicates of a card in `known` (CG-18). Runs
+/// every cycle; on an empty state store this is the whole baseline.
+pub fn pair(unsynced: &Unsynced, known: &KnownCards, winner: ConflictWinner) -> Paired {
     let mut pairing = Pairing {
         icloud: unsynced.icloud.iter().collect(),
         fastmail: unsynced.fastmail.iter().collect(),
@@ -60,9 +135,21 @@ pub fn pair(unsynced: &Unsynced, winner: ConflictWinner) -> Paired {
         ops: pairing.ops,
         skips: Vec::new(),
     };
-    let settled = settle_side(Side::ICloud, &pairing.icloud, &pairing.fastmail, &pairing.pass2.icloud)
-        .into_iter()
-        .chain(settle_side(Side::Fastmail, &pairing.fastmail, &pairing.icloud, &pairing.pass2.fastmail));
+    let settled = settle_side(
+        Side::ICloud,
+        &pairing.icloud,
+        &pairing.fastmail,
+        &pairing.pass2.icloud,
+        known.side(Side::Fastmail),
+    )
+    .into_iter()
+    .chain(settle_side(
+        Side::Fastmail,
+        &pairing.fastmail,
+        &pairing.icloud,
+        &pairing.pass2.fastmail,
+        known.side(Side::ICloud),
+    ));
     for outcome in settled {
         match outcome {
             Settled::Copy(op) => paired.ops.push(*op),
@@ -307,8 +394,16 @@ fn mutual_pairs(candidates: &[Vec<usize>], fastmail_len: usize) -> Vec<(usize, u
 /// usable name; then a nameless card (2026-09-27 decision) is a skip when
 /// another nameless card on the other side shares an email or phone with it,
 /// and a copy otherwise; a named card falls back to the name-collision
-/// check.
-fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard], pass2: &HashMap<Uid, (u32, Vec<DisplayIdentity>)>) -> Vec<Settled> {
+/// check. A nameless card with no such collision is also a skip
+/// (`LikelyDuplicate`, CG-18) when it shares an email or phone with any card
+/// in `known`, the other side's cards this cycle; otherwise it is copied.
+fn settle_side(
+    side: Side,
+    cards: &[&UnsyncedCard],
+    other: &[&UnsyncedCard],
+    pass2: &HashMap<Uid, (u32, Vec<DisplayIdentity>)>,
+    known: &[KnownCard],
+) -> Vec<Settled> {
     let own = identity_candidates(cards, other);
     let reverse = identity_candidates(other, cards);
     let other_keys: Vec<MatchKeys> = other.iter().map(|c| c.card.match_keys()).collect();
@@ -333,12 +428,28 @@ fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard], pas
                     candidate_count: *count,
                     identity: card.card.display_identity(),
                     candidates: pass2_candidates.clone(),
+                    reason: SkipReason::Ambiguous,
                 });
             }
             let keys = card.card.match_keys();
             if keys.name_key().is_none() {
                 let matches = &nameless_own[index];
                 if matches.is_empty() {
+                    // CG-18: a duplicate of a card the other side already
+                    // holds is skipped; a shared ORG alone never counts.
+                    let duplicates: Vec<&KnownCard> = known.iter().filter(|k| keys.shares_contact_point(&k.keys)).collect();
+                    if !duplicates.is_empty() {
+                        return Settled::Skip(Skip {
+                            side,
+                            resource: card.resource.clone(),
+                            uid: uid.clone(),
+                            content_hash: card.card.canonical_hash(SYNC_HASH),
+                            candidate_count: u32::try_from(duplicates.len()).unwrap_or(u32::MAX),
+                            identity: card.card.display_identity(),
+                            candidates: duplicates.iter().map(|k| k.identity.clone()).collect(),
+                            reason: SkipReason::LikelyDuplicate,
+                        });
+                    }
                     return Settled::Copy(Box::new(Op::Create {
                         uid: uid.clone(),
                         to: side.other(),
@@ -355,6 +466,7 @@ fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard], pas
                     candidate_count: candidate_count(matches, &nameless_reverse),
                     identity: card.card.display_identity(),
                     candidates: matches.iter().map(|&o| other[o].card.display_identity()).collect(),
+                    reason: SkipReason::Ambiguous,
                 });
             }
             let same_name = keys.name_key().and_then(|name| other_names.get(name)).map_or(&[][..], Vec::as_slice);
@@ -374,6 +486,7 @@ fn settle_side(side: Side, cards: &[&UnsyncedCard], other: &[&UnsyncedCard], pas
                 candidate_count: candidate_count(candidates, &reverse),
                 identity: card.card.display_identity(),
                 candidates: same_name.iter().map(|&o| other[o].card.display_identity()).collect(),
+                reason: SkipReason::Ambiguous,
             })
         })
         .collect()
@@ -459,16 +572,30 @@ fn name_buckets(keys: &[MatchKeys]) -> HashMap<&str, Vec<usize>> {
 mod tests {
     use super::*;
     use crate::{
-        contact::VCard,
-        sync::fixtures::{EMBEDDED_PHOTO, URI_PHOTO, card, card_with, on_fastmail, on_icloud},
+        contact::{ETag, Href, VCardError},
+        sync::fixtures::{EMBEDDED_PHOTO, URI_PHOTO, card, card_with, fetched, on_fastmail, on_icloud, row},
     };
 
     fn run(icloud: Vec<VCard>, fastmail: Vec<VCard>, winner: Side) -> Paired {
+        run_with(icloud, fastmail, &[], &[], winner)
+    }
+
+    /// `run` plus extra cards each side already holds (synced or paired
+    /// elsewhere), which only feed `KnownCards`.
+    fn run_with(icloud: Vec<VCard>, fastmail: Vec<VCard>, icloud_known: &[VCard], fastmail_known: &[VCard], winner: Side) -> Paired {
         let unsynced = Unsynced {
             icloud: icloud.into_iter().map(on_icloud).collect(),
             fastmail: fastmail.into_iter().map(on_fastmail).collect(),
         };
-        pair(&unsynced, winner)
+        let known = KnownCards {
+            icloud: unsynced.icloud.iter().map(|c| &c.card).chain(icloud_known).map(KnownCard::of).collect(),
+            fastmail: unsynced.fastmail.iter().map(|c| &c.card).chain(fastmail_known).map(KnownCard::of).collect(),
+        };
+        pair(&unsynced, &known, winner)
+    }
+
+    fn skips(paired: &Paired) -> Vec<(Side, &str, SkipReason)> {
+        paired.skips.iter().map(|s| (s.side, s.uid.as_str(), s.reason)).collect()
     }
 
     fn render(ops: &[Op]) -> String {
@@ -722,6 +849,7 @@ mod tests {
                 candidate_count: 0,
                 identity: icloud.display_identity(),
                 candidates: vec![fastmail.display_identity()],
+                reason: SkipReason::Ambiguous,
             }
         );
     }
@@ -872,5 +1000,133 @@ mod tests {
             render(&paired.ops),
             "conflict(baseline) icloud wins uid=u1 → fastmail /f/u1.vcf@f-u1\ncreate icloud uid=fm-2 from=/f/fm-2.vcf"
         );
+    }
+
+    #[test]
+    fn a_nameless_duplicate_of_a_card_paired_by_uid_is_skipped() {
+        // The CG-18 incident: KW pharmacy pairs by UID; Fastmail's nameless
+        // ORG-only duplicate shares its phone and must not be copied.
+        let kw = card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+        let duplicate = card_with("fm-2", "", "ORG:KW pharmacy\r\nTEL:+1 (555) 0100\r\n");
+
+        let paired = run(vec![kw.clone()], vec![kw, duplicate], Side::ICloud);
+
+        assert_eq!(render(&paired.ops), "adopt uid=u1 icloud=/i/u1.vcf@i-u1 fastmail=/f/u1.vcf@f-u1");
+        assert_eq!(skips(&paired), [(Side::Fastmail, "fm-2", SkipReason::LikelyDuplicate)]);
+        let candidates: Vec<String> = paired.skips[0].candidates.iter().map(ToString::to_string).collect();
+        assert_eq!(candidates, ["KW pharmacy"]);
+        assert_eq!(paired.skips[0].candidate_count, 1);
+    }
+
+    #[test]
+    fn a_nameless_duplicate_on_icloud_is_skipped_too() {
+        let kw = card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+        let duplicate = card_with("ic-2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n");
+
+        let paired = run(vec![kw.clone(), duplicate], vec![kw], Side::ICloud);
+
+        assert_eq!(render(&paired.ops), "adopt uid=u1 icloud=/i/u1.vcf@i-u1 fastmail=/f/u1.vcf@f-u1");
+        assert_eq!(skips(&paired), [(Side::ICloud, "ic-2", SkipReason::LikelyDuplicate)]);
+    }
+
+    #[test]
+    fn a_nameless_card_sharing_an_email_with_an_unpaired_named_card_is_skipped() {
+        let paired = run(
+            vec![card_with("ic-1", "Ann Lee", "EMAIL:ann@example.com\r\n")],
+            vec![card_with("fm-1", "", "EMAIL:ANN@example.com\r\nNOTE:x\r\n")],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "create fastmail uid=ic-1 from=/i/ic-1.vcf");
+        assert_eq!(skips(&paired), [(Side::Fastmail, "fm-1", SkipReason::LikelyDuplicate)]);
+    }
+
+    #[test]
+    fn a_nameless_duplicate_of_an_already_synced_card_is_skipped() {
+        // Steady state: the named card is synced, so it is known but never
+        // reaches pairing.
+        let paired = run_with(
+            vec![],
+            vec![card_with("fm-2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n")],
+            &[card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n")],
+            &[],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "");
+        assert_eq!(skips(&paired), [(Side::Fastmail, "fm-2", SkipReason::LikelyDuplicate)]);
+    }
+
+    #[test]
+    fn a_nameless_card_sharing_only_an_org_is_still_copied() {
+        let paired = run(
+            vec![card_with("ic-1", "KW pharmacy", "ORG:KW pharmacy\r\n")],
+            vec![card_with("fm-1", "", "ORG:KW pharmacy\r\nNOTE:x\r\n")],
+            Side::ICloud,
+        );
+
+        assert_eq!(
+            render(&paired.ops),
+            "create fastmail uid=ic-1 from=/i/ic-1.vcf\ncreate icloud uid=fm-1 from=/f/fm-1.vcf"
+        );
+        assert_eq!(paired.skips, []);
+    }
+
+    #[test]
+    fn a_nameless_card_with_an_unrelated_phone_is_copied() {
+        let paired = run_with(
+            vec![],
+            vec![card_with("fm-2", "", "ORG:Other Shop\r\nTEL:+1 555 0199\r\n")],
+            &[card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n")],
+            &[],
+            Side::ICloud,
+        );
+
+        assert_eq!(render(&paired.ops), "create icloud uid=fm-2 from=/f/fm-2.vcf");
+        assert_eq!(paired.skips, []);
+    }
+
+    #[test]
+    fn nameless_collisions_keep_their_ambiguous_reason() {
+        let icloud = card_with("ic-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:one\r\n");
+        let fastmail = card_with("fm-1", "x@example.com", "EMAIL:x@example.com\r\nNOTE:two\r\n");
+
+        let paired = run(vec![icloud], vec![fastmail], Side::ICloud);
+
+        assert_eq!(
+            skips(&paired),
+            [(Side::ICloud, "ic-1", SkipReason::Ambiguous), (Side::Fastmail, "fm-1", SkipReason::Ambiguous)]
+        );
+    }
+
+    #[test]
+    fn known_cards_take_fetched_cards_then_state_rows_once_each() {
+        let fresh = card_with("a", "Ann New", "TEL:+1 555 0100\r\n");
+        let stale = card_with("a", "Ann Old", "TEL:+1 555 0100\r\n");
+        let bob = card_with("b", "Bob Roe", "");
+        let snapshot: Snapshot = [
+            (Href::from("/i/a.vcf"), fetched("i-a", fresh)),
+            (
+                Href::from("/i/bad.vcf"),
+                Entry::Fetched {
+                    etag: ETag::from("i-bad"),
+                    card: Err(VCardError::MissingUid),
+                },
+            ),
+            (Href::from("/i/held.vcf"), Entry::Held(ETag::from("i-held"))),
+        ]
+        .into_iter()
+        .collect();
+        let rows = vec![
+            row(1, &stale, ("/i/a.vcf", "i-a0"), ("/f/a.vcf", "f-a")),
+            row(2, &bob, ("/i/b.vcf", "i-b"), ("/f/b.vcf", "f-b")),
+        ];
+
+        let known = KnownCards::collect(&snapshot, &Snapshot::new(), &rows);
+
+        let icloud: Vec<(&str, String)> = known.icloud.iter().map(|k| (k.uid.as_str(), k.identity.to_string())).collect();
+        assert_eq!(icloud, [("a", "Ann New".to_owned()), ("b", "Bob Roe".to_owned())]);
+        let fastmail: Vec<&str> = known.fastmail.iter().map(|k| k.uid.as_str()).collect();
+        assert_eq!(fastmail, ["a", "b"], "synced contacts are known on both sides");
     }
 }

@@ -1,4 +1,4 @@
-use super::{BaselineReport, Plan, PlanInput, Planned, Skip, guard, pairing, planner};
+use super::{BaselineReport, KnownCards, Plan, PlanInput, Planned, Skip, guard, pairing, planner};
 
 /// One cycle's complete plan: the planner's ops for synced contacts, then
 /// pairing's for unsynced cards.
@@ -16,7 +16,8 @@ pub struct CyclePlan {
 pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     let Planned { mut plan, unsynced } = planner::plan(input);
     guard::hold_cross_deletes(&mut plan, input.state);
-    let paired = pairing::pair(&unsynced, input.winner);
+    let known = KnownCards::collect(input.icloud, input.fastmail, input.state);
+    let paired = pairing::pair(&unsynced, &known, input.winner);
     plan.ops.extend(paired.ops);
     let report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
     CyclePlan {
@@ -33,7 +34,7 @@ mod tests {
         contact::{ETag, Href, Side, VCard, VCardError},
         state::ContactState,
         sync::{
-            Entry, Snapshot,
+            Entry, SkipReason, Snapshot,
             fixtures::{card, card_with, fetched, row, unchanged},
         },
     };
@@ -262,5 +263,27 @@ mod tests {
         let report = planned.report.to_string();
         assert!(report.contains("  Harbor Grill uid=b: delete on icloud, with uid=a"), "{report}");
         assert!(!report.contains("555"), "PII leaked into the report: {report}");
+    }
+
+    #[test]
+    fn a_new_nameless_duplicate_of_a_synced_card_is_skipped() {
+        // The synced card is Unchanged (not fetched): only its state row
+        // makes it known.
+        let kw = card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+        let state = vec![row(1, &kw, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        let mut icloud = Snapshot::new();
+        icloud.insert(Href::from("/i/u1.vcf"), unchanged("i1"));
+        let mut fastmail = Snapshot::new();
+        fastmail.insert(Href::from("/f/u1.vcf"), unchanged("f1"));
+        fastmail.insert(
+            Href::from("/f/dup.vcf"),
+            fetched("f-dup", card_with("fm-2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n")),
+        );
+
+        let planned = cycle(&icloud, &fastmail, &state, Side::ICloud);
+
+        assert_eq!(render(&planned.plan), "(nothing)");
+        let reasons: Vec<(&str, SkipReason)> = planned.skips.iter().map(|s| (s.uid.as_str(), s.reason)).collect();
+        assert_eq!(reasons, [("fm-2", SkipReason::LikelyDuplicate)]);
     }
 }
