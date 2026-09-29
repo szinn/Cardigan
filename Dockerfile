@@ -1,0 +1,68 @@
+FROM rust:1@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS chef
+
+# ARG TARGETPLATFORM
+# ARG TARGETARCH
+# ARG TARGETOS
+
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools pkg-config && rm -rf /var/lib/apt/lists/*
+
+RUN cargo install cargo-chef --locked
+RUN rustup target add x86_64-unknown-linux-musl
+
+# Install protobuf-compiler
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    binutils \
+    build-essential \
+    curl \
+    mold \
+    musl-tools \
+    pkg-config \
+    protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN cargo install dioxus-cli --locked --version 0.7.3
+
+RUN curl -fsSL -o /usr/local/bin/tailwindcss \
+    https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.1/tailwindcss-linux-x64 && \
+    chmod +x /usr/local/bin/tailwindcss
+
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder-server
+COPY --from=planner /app/recipe.json recipe.json
+
+# Build deps layer (cached)
+RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
+
+COPY . .
+
+# Build actual binary
+RUN cargo build --bin cardigan --release --target x86_64-unknown-linux-musl
+RUN ls -lR target/x86_64-unknown-linux-musl
+
+# Sanity check: should say "not a dynamic executable"
+RUN ldd target/x86_64-unknown-linux-musl/release/cardigan || true
+
+FROM ubuntu:latest@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS certs
+RUN groupadd --gid 1234 cardigan && useradd -g 1234 -M -u 1234 -s /usr/sbin/nologin cardigan
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+RUN update-ca-certificates
+
+# FROM chef AS runtime
+FROM scratch
+COPY --from=certs /etc/passwd /etc/passwd
+COPY --from=certs /etc/group /etc/group
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder-server /app/target/x86_64-unknown-linux-musl/release/cardigan /app/cardigan
+
+LABEL org.opencontainers.image.source="https://github.com/szinn/Cardigan"
+LABEL org.opencontainers.image.description="Take Control Of Your Project Issues"
+
+WORKDIR /app
+USER cardigan
+ENTRYPOINT [ "/app/cardigan", "sync" ]
