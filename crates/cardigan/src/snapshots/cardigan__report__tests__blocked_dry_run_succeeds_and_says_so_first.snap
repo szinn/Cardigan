@@ -11,4 +11,4 @@ state only: adopt 0, refresh 0, forget 0
 Plan:
 
 Baseline report:
-in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 0

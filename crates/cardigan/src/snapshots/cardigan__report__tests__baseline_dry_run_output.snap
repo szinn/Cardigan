@@ -13,7 +13,7 @@ create fastmail uid=a from=/card/a.vcf
 create icloud uid=c from=/dav/c.vcf
 
 Baseline report:
-in sync: 1, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 2
+in sync: 1, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 2
 In sync (same UID, same content):
   Bravo uid=b
 To copy:

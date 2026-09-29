@@ -87,15 +87,29 @@ impl fmt::Display for ReportDuplicate {
 
 /// Every synced contact with no name that shares an email or phone with
 /// another synced contact, paired with the first such contact (state order).
+/// Each unordered pair is listed once: a row is left out when its match is
+/// also nameless, comes earlier in state order, and is already listed with
+/// this row as its match (otherwise the user could delete both copies).
 pub fn synced_duplicates(state: &[ContactState]) -> Vec<ReportDuplicate> {
     let keys: Vec<MatchKeys> = state.iter().map(|row| row.last_synced_vcard.match_keys()).collect();
+    let matches: Vec<Option<usize>> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, own)| {
+            if own.name_key().is_some() {
+                return None;
+            }
+            (0..keys.len()).find(|&j| j != i && own.shares_contact_point(&keys[j]))
+        })
+        .collect();
     state
         .iter()
-        .zip(&keys)
         .enumerate()
-        .filter(|(_, (_, own))| own.name_key().is_none())
-        .filter_map(|(i, (row, own))| {
-            let (j, _) = keys.iter().enumerate().find(|&(j, other)| j != i && own.shares_contact_point(other))?;
+        .filter_map(|(i, row)| {
+            let j = matches[i]?;
+            if j < i && matches[j] == Some(i) {
+                return None;
+            }
             let like = &state[j];
             Some(ReportDuplicate {
                 uid: row.uid.clone(),
@@ -211,12 +225,13 @@ impl fmt::Display for BaselineReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "in sync: {}, conflicts: {}, re-UID'd: {}, paired by identity: {}, skipped: {}, to copy: {}",
+            "in sync: {}, conflicts: {}, re-UID'd: {}, paired by identity: {}, skipped: {}, likely duplicates: {}, to copy: {}",
             self.in_sync.len(),
             self.conflicts.len(),
             self.reuid.len(),
             self.by_identity.len(),
             self.skipped.len(),
+            self.likely_duplicates.len(),
             self.copies.len()
         )?;
         section(f, "In sync (same UID, same content):", &self.in_sync)?;
@@ -237,7 +252,8 @@ impl fmt::Display for BaselineReport {
         if !self.likely_duplicates.is_empty() {
             writeln!(
                 f,
-                "Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or name it to sync it):"
+                "Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or give it a distinct name to \
+                 sync it):"
             )?;
             for skip in &self.likely_duplicates {
                 let like: Vec<String> = skip.candidates.iter().map(ToString::to_string).collect();
@@ -276,7 +292,7 @@ impl fmt::Display for BaselineReport {
         )?;
         section(
             f,
-            "Synced contacts with no name that look like duplicates (delete the duplicate from a client that shows only one account):",
+            "Synced contacts with no name that look like duplicates (delete one copy of each from a client that shows only one account):",
             &self.synced_duplicates,
         )
     }
@@ -329,10 +345,10 @@ mod tests {
         assert_eq!(report.likely_duplicates.len(), 1);
         assert_eq!(report.skipped.len(), 1);
         insta::assert_snapshot!(report.to_string(), @r"
-        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 1, to copy: 0
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 1, likely duplicates: 1, to copy: 0
         Skipped, never guessed (edit either card to resolve):
           icloud <no name> (Acme): 1 candidates: Acme Sales
-        Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or name it to sync it):
+        Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or give it a distinct name to sync it):
           fastmail <no name> (KW pharmacy) uid=fm-2: like KW pharmacy
         ");
     }
@@ -364,7 +380,7 @@ mod tests {
 
         assert_eq!(report.held.len(), 2);
         insta::assert_snapshot!(report.to_string(), @r"
-        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 0
         Unreadable (their counterparts may be copied):
           fastmail /f/bad.vcf
         Held (not synced):
@@ -404,7 +420,7 @@ mod tests {
         assert_eq!(report.held_deletes.len(), 2);
         assert_eq!(report.held, [], "held deletes are not in the Held section");
         insta::assert_snapshot!(report.to_string(), @r"
-        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 0
         Held deletes (may be one contact deleted across two pairs):
           Edit the copy you want to keep, or delete every remaining copy. Deleting only one lets the other held delete go through.
           <no name> (Harbor Grill) uid=a: delete on fastmail, with uid=b
@@ -435,9 +451,23 @@ mod tests {
         let rendered = report.to_string();
         assert!(!rendered.contains("555"), "PII leaked: {rendered}");
         insta::assert_snapshot!(rendered, @r"
-        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
-        Synced contacts with no name that look like duplicates (delete the duplicate from a client that shows only one account):
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 0
+        Synced contacts with no name that look like duplicates (delete one copy of each from a client that shows only one account):
           <no name> (KW pharmacy) uid=u2: like KW pharmacy uid=u1
         ");
+    }
+
+    #[test]
+    fn two_synced_nameless_contacts_sharing_a_phone_are_listed_once() {
+        let first = crate::sync::fixtures::card_with("u1", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n");
+        let second = crate::sync::fixtures::card_with("u2", "", "ORG:KW pharmacy\r\nTEL:+1 (555) 0100\r\n");
+        let state: Vec<_> = (1..)
+            .zip([first, second].iter())
+            .map(|(id, card)| row(id, card, ("/i/x.vcf", "i"), ("/f/x.vcf", "f")))
+            .collect();
+
+        let lines: Vec<String> = synced_duplicates(&state).iter().map(ToString::to_string).collect();
+
+        assert_eq!(lines, ["<no name> (KW pharmacy) uid=u1: like <no name> (KW pharmacy) uid=u2"]);
     }
 }

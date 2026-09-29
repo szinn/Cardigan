@@ -301,11 +301,14 @@ fn log_cycle(cycle: &CyclePlan, summary: &CycleSummary) {
     for skip in &cycle.skips {
         let record = skip.identity.to_string();
         if skip.reason == SkipReason::LikelyDuplicate {
+            // DisplayIdentity only (name and ORG): PII-safe.
+            let names = skip.candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
             tracing::warn!(
                 record = ?record,
                 uid = %skip.uid,
                 side = %skip.side,
-                "not synced: a contact with no name shares an email or phone with a contact on the other side, so it is likely a duplicate; delete it, or name it to sync it"
+                like = ?names,
+                "not synced: a contact with no name shares an email or phone with a contact on the other side, so it is likely a duplicate; delete it, or give it a distinct name to sync it"
             );
         } else if skip.identity.name().is_none() && !skip.candidates.is_empty() {
             tracing::warn!(

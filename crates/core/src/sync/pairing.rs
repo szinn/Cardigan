@@ -918,7 +918,7 @@ mod tests {
 
         assert!(!rendered.contains('@'), "PII leaked into the report: {rendered}");
         insta::assert_snapshot!(rendered, @r"
-        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 2, to copy: 0
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 2, likely duplicates: 0, to copy: 0
         Skipped, never guessed (edit either card to resolve):
           icloud <no name>: 1 candidates: <no name>
           fastmail <no name>: 1 candidates: <no name>

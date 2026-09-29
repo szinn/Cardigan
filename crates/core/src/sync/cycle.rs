@@ -151,7 +151,7 @@ mod tests {
         let report = planned.report.to_string();
         assert!(!report.contains("@example"), "PII leaked into the report: {report}");
         insta::assert_snapshot!(report, @r"
-        in sync: 1, conflicts: 1, re-UID'd: 1, paired by identity: 1, skipped: 2, to copy: 3
+        in sync: 1, conflicts: 1, re-UID'd: 1, paired by identity: 1, skipped: 2, likely duplicates: 0, to copy: 3
         In sync (same UID, same content):
           Jane Doe uid=u1
         Conflicts (same UID, different content):
@@ -181,7 +181,7 @@ mod tests {
 
         assert_eq!(
             planned.report.to_string(),
-            "in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0\n"
+            "in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, likely duplicates: 0, to copy: 0\n"
         );
     }
 
