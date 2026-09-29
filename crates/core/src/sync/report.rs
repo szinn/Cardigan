@@ -2,8 +2,8 @@ use std::{collections::HashSet, fmt};
 
 use super::{Diagnostic, Op, PairPass, Skip, SkipReason};
 use crate::{
-    contact::{DisplayIdentity, Href, Side, Uid, VCard},
-    state::ConflictOrigin,
+    contact::{DisplayIdentity, Href, MatchKeys, Side, Uid, VCard},
+    state::{ConflictOrigin, ContactState},
 };
 
 /// A paired contact in the report.
@@ -67,6 +67,46 @@ impl fmt::Display for ReportCopy {
     }
 }
 
+/// A synced contact with no name that shares an email or phone with another
+/// synced contact: most likely a duplicate a baseline copied before CG-18.
+/// Read-only; the user deletes one copy from a client that shows only one
+/// account (a client showing both merges by name, see CG-17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportDuplicate {
+    pub uid: Uid,
+    pub identity: DisplayIdentity,
+    pub like_uid: Uid,
+    pub like: DisplayIdentity,
+}
+
+impl fmt::Display for ReportDuplicate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} uid={}: like {} uid={}", self.identity, self.uid, self.like, self.like_uid)
+    }
+}
+
+/// Every synced contact with no name that shares an email or phone with
+/// another synced contact, paired with the first such contact (state order).
+pub fn synced_duplicates(state: &[ContactState]) -> Vec<ReportDuplicate> {
+    let keys: Vec<MatchKeys> = state.iter().map(|row| row.last_synced_vcard.match_keys()).collect();
+    state
+        .iter()
+        .zip(&keys)
+        .enumerate()
+        .filter(|(_, (_, own))| own.name_key().is_none())
+        .filter_map(|(i, (row, own))| {
+            let (j, _) = keys.iter().enumerate().find(|&(j, other)| j != i && own.shares_contact_point(other))?;
+            let like = &state[j];
+            Some(ReportDuplicate {
+                uid: row.uid.clone(),
+                identity: row.last_synced_vcard.display_identity(),
+                like_uid: like.uid.clone(),
+                like: like.last_synced_vcard.display_identity(),
+            })
+        })
+        .collect()
+}
+
 /// What pairing will do this cycle, for `dry-run` and the cycle summary.
 /// Built from the plan alone, so a dry run and a real run report the same
 /// thing. PII-safe: names, organizations, UIDs and hrefs only.
@@ -97,6 +137,10 @@ pub struct BaselineReport {
     /// need a by-hand membership fix; membership on both sides stays stale
     /// until CG-14 rewrites it.
     pub groups_with_reuid_members: Vec<ReportCopy>,
+    /// CG-18 cleanup aid: synced nameless contacts that look like duplicates
+    /// of another synced contact (`synced_duplicates`). Filled by
+    /// `plan_cycle`, not by `build`.
+    pub synced_duplicates: Vec<ReportDuplicate>,
 }
 
 impl BaselineReport {
@@ -229,6 +273,11 @@ impl fmt::Display for BaselineReport {
             f,
             "Groups listing re-UID'd members (membership stale until CG-14):",
             &self.groups_with_reuid_members,
+        )?;
+        section(
+            f,
+            "Synced contacts with no name that look like duplicates (delete the duplicate from a client that shows only one account):",
+            &self.synced_duplicates,
         )
     }
 }
@@ -249,7 +298,7 @@ mod tests {
     use super::*;
     use crate::{
         contact::{ETag, VCardError},
-        sync::fixtures::{card_with, res},
+        sync::fixtures::{card_with, res, row},
     };
 
     fn skip(side: Side, uid: &str, identity: &str, reason: SkipReason, candidates: &[&str]) -> Skip {
@@ -360,6 +409,35 @@ mod tests {
           Edit the copy you want to keep, or delete every remaining copy. Deleting only one lets the other held delete go through.
           <no name> (Harbor Grill) uid=a: delete on fastmail, with uid=b
           Harbor Grill uid=b: delete on icloud, with uid=a
+        ");
+    }
+
+    #[test]
+    fn synced_nameless_duplicates_are_listed_for_manual_cleanup() {
+        let kw = crate::sync::fixtures::card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+        let dup = crate::sync::fixtures::card_with("u2", "", "ORG:KW pharmacy\r\nTEL:+1 (555) 0100\r\n");
+        let unrelated = crate::sync::fixtures::card_with("u3", "", "ORG:Other\r\nTEL:+1 555 0199\r\n");
+        let blank = crate::sync::fixtures::card_with("u4", "", "ORG:KW pharmacy\r\n");
+        let state: Vec<_> = (1..)
+            .zip([kw, dup, unrelated, blank].iter())
+            .map(|(id, card)| row(id, card, ("/i/x.vcf", "i"), ("/f/x.vcf", "f")))
+            .collect();
+
+        let duplicates = synced_duplicates(&state);
+
+        let lines: Vec<String> = duplicates.iter().map(ToString::to_string).collect();
+        assert_eq!(lines, ["<no name> (KW pharmacy) uid=u2: like KW pharmacy uid=u1"]);
+
+        let report = BaselineReport {
+            synced_duplicates: duplicates,
+            ..BaselineReport::default()
+        };
+        let rendered = report.to_string();
+        assert!(!rendered.contains("555"), "PII leaked: {rendered}");
+        insta::assert_snapshot!(rendered, @r"
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 0, to copy: 0
+        Synced contacts with no name that look like duplicates (delete the duplicate from a client that shows only one account):
+          <no name> (KW pharmacy) uid=u2: like KW pharmacy uid=u1
         ");
     }
 }

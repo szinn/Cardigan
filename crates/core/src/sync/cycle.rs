@@ -19,7 +19,8 @@ pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     let known = KnownCards::collect(input.icloud, input.fastmail, input.state);
     let paired = pairing::pair(&unsynced, &known, input.winner);
     plan.ops.extend(paired.ops);
-    let report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
+    let mut report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
+    report.synced_duplicates = super::synced_duplicates(input.state);
     CyclePlan {
         plan,
         skips: paired.skips,
@@ -285,5 +286,30 @@ mod tests {
         assert_eq!(render(&planned.plan), "(nothing)");
         let reasons: Vec<(&str, SkipReason)> = planned.skips.iter().map(|s| (s.uid.as_str(), s.reason)).collect();
         assert_eq!(reasons, [("fm-2", SkipReason::LikelyDuplicate)]);
+    }
+
+    #[test]
+    fn the_report_lists_synced_nameless_duplicates() {
+        let kw = card_with("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+        let dup = card_with("u2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n");
+        let state = vec![
+            row(1, &kw, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1")),
+            row(2, &dup, ("/i/u2.vcf", "i2"), ("/f/u2.vcf", "f2")),
+        ];
+        let side = |s: &str| -> Snapshot {
+            [("u1", "1"), ("u2", "2")]
+                .into_iter()
+                .map(|(uid, n)| (Href::from(format!("/{s}/{uid}.vcf")), unchanged(&format!("{s}{n}"))))
+                .collect()
+        };
+
+        let planned = cycle(&side("i"), &side("f"), &state, Side::ICloud);
+
+        assert_eq!(render(&planned.plan), "(nothing)");
+        assert!(
+            planned.report.to_string().contains("  <no name> (KW pharmacy) uid=u2: like KW pharmacy uid=u1"),
+            "{}",
+            planned.report
+        );
     }
 }
