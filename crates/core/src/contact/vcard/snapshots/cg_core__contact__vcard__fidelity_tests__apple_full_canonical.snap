@@ -2,8 +2,8 @@
 source: crates/core/src/contact/vcard/fidelity_tests.rs
 expression: "card(APPLE_FULL).canonical_form(HashOptions::default())"
 ---
-CANONICAL:1
-BDAY;VALUE=DATE:1980-04-01
+CANONICAL:2
+BDAY:19800401
 BEGIN:VCARD
 EMAIL;TYPE=INTERNET,WORK:jane.appleseed@example.org
 END:VCARD

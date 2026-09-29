@@ -9,10 +9,18 @@ use super::{Property, VCard};
 
 /// Version of the canonical form. Bump it whenever `canonical_form` changes
 /// so stored hashes can be recognised as stale rather than as edits.
-pub const CANONICAL_VERSION: u8 = 1;
+pub const CANONICAL_VERSION: u8 = 2;
 
 /// Properties that change on every server write without a meaningful edit.
 const VOLATILE: [&str; 2] = ["REV", "PRODID"];
+
+/// Apple-private properties Fastmail drops on save: never content, or every
+/// such card would look edited on one side.
+const SERVER_DROPPED: [&str; 1] = ["VND-63-SENSITIVE-CONTENT-CONFIG"];
+
+/// Date-valued properties, compared by their date: `1964-05-30` and
+/// `19640530` are the same, and a `VALUE=DATE` parameter adds nothing.
+const DATE_PROPERTIES: [&str; 2] = ["BDAY", "ANNIVERSARY"];
 
 /// Parameters whose values are case-insensitive, compared as sorted sets.
 const CASE_INSENSITIVE_PARAMS: [&str; 4] = ["TYPE", "ENCODING", "VALUE", "CHARSET"];
@@ -86,8 +94,10 @@ impl VCard {
     }
 
     /// The comparison-only text form. Rules (version `CANONICAL_VERSION`):
-    /// - drop `REV`, `PRODID` (and `PHOTO` when `exclude_photo`, `UID` when
-    ///   `exclude_uid`);
+    /// - drop `REV`, `PRODID`, `VND-63-SENSITIVE-CONTENT-CONFIG` (and `PHOTO`
+    ///   when `exclude_photo`, `UID` when `exclude_uid`);
+    /// - `BDAY`/`ANNIVERSARY`: drop `VALUE=DATE`, and write the date without
+    ///   `-` separators (`--0530` for a year-less date) and a time without `:`;
     /// - upper-case property and parameter names, merge repeated parameters;
     /// - `TYPE`/`ENCODING`/`VALUE`/`CHARSET` values upper-cased, sorted and
     ///   de-duplicated; `ENCODING=BASE64` is `ENCODING=B`;
@@ -130,14 +140,20 @@ impl VCard {
 }
 
 fn is_excluded(property: &Property, options: HashOptions) -> bool {
-    VOLATILE.iter().any(|name| property.is(name)) || (options.exclude_photo && property.is("PHOTO")) || (options.exclude_uid && property.is("UID"))
+    VOLATILE.iter().chain(&SERVER_DROPPED).any(|name| property.is(name))
+        || (options.exclude_photo && property.is("PHOTO"))
+        || (options.exclude_uid && property.is("UID"))
 }
 
 /// `NAME;PARAM=v1,v2;...:value` without the group prefix.
 fn canonical_line(property: &Property) -> String {
+    let is_date = DATE_PROPERTIES.iter().any(|name| property.is(name));
     let mut params: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for param in property.params() {
         let name = param.name().to_ascii_uppercase();
+        if is_date && name == "VALUE" && param.values().iter().all(|value| value.eq_ignore_ascii_case("DATE")) {
+            continue;
+        }
         let case_insensitive = CASE_INSENSITIVE_PARAMS.contains(&name.as_str());
         let values = param.values().iter().map(|value| {
             if !case_insensitive {
@@ -160,8 +176,32 @@ fn canonical_line(property: &Property) -> String {
         write!(line, ";{name}={}", quoted.join(",")).expect("write to String is infallible");
     }
     line.push(':');
-    line.push_str(&canonical_value(property.value()));
+    if is_date {
+        line.push_str(&canonical_date(property.value()));
+    } else {
+        line.push_str(&canonical_value(property.value()));
+    }
     line
+}
+
+/// A date (or date-time) in basic format: `1964-05-30` → `19640530`,
+/// `--05-30` → `--0530`, `T16:37:00Z` → `T163700Z`. A value that isn't a date
+/// (vCard 3 allows free text) passes through unchanged.
+fn canonical_date(value: &str) -> String {
+    let looks_like_date = value.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | 'Z' | '+'));
+    if !looks_like_date {
+        return canonical_value(value);
+    }
+    let (date, time) = value.split_once('T').map_or((value, None), |(date, time)| (date, Some(time)));
+    let mut out = match date.strip_prefix("--") {
+        Some(rest) => format!("--{}", rest.replace('-', "")),
+        None => date.replace('-', ""),
+    };
+    if let Some(time) = time {
+        out.push('T');
+        out.push_str(&time.replace(':', ""));
+    }
+    out
 }
 
 /// Wraps a parameter value in double quotes when it contains a delimiter
@@ -239,7 +279,7 @@ mod tests {
         let card = VCard::parse(text).expect("card parses");
         assert_eq!(
             card.canonical_form(HashOptions::default()),
-            "CANONICAL:1\nBEGIN:VCARD\nEND:VCARD\nFN:Jane \
+            "CANONICAL:2\nBEGIN:VCARD\nEND:VCARD\nFN:Jane \
              Doe\nG1.EMAIL;TYPE=INTERNET,PREF:jane@example.com\nG1.X-ABLABEL:_$!<Other>!$_\nN:Doe;Jane;;;\nTEL;TYPE=CELL,VOICE:+1 555 \
              0100\nUID:ABC-123\nVERSION:3.0\n"
         );
@@ -389,6 +429,37 @@ mod tests {
         assert_eq!(
             hash(&vcf(&["EMAIL;TYPE=HOME,INTERNET:jane@example.com"])),
             hash(&vcf(&["EMAIL;type=internet;type=home:jane@example.com"]))
+        );
+    }
+
+    #[test]
+    fn date_spelling_does_not_matter() {
+        // Fastmail stores iCloud's `BDAY;value=date:1964-05-30` as
+        // `BDAY:19640530`.
+        assert_eq!(hash(&vcf(&["BDAY;value=date:1964-05-30"])), hash(&vcf(&["BDAY:19640530"])));
+        assert_eq!(hash(&vcf(&["ANNIVERSARY;VALUE=DATE:2001-06-15"])), hash(&vcf(&["ANNIVERSARY:20010615"])));
+        assert_eq!(hash(&vcf(&["BDAY:--05-30"])), hash(&vcf(&["BDAY:--0530"])));
+        assert_eq!(
+            hash(&vcf(&["BDAY;X-APPLE-OMIT-YEAR=1604;value=date:1604-05-30"])),
+            hash(&vcf(&["BDAY;X-APPLE-OMIT-YEAR=1604:16040530"]))
+        );
+    }
+
+    #[test]
+    fn a_different_date_is_a_change() {
+        assert_ne!(hash(&vcf(&["BDAY:1964-05-30"])), hash(&vcf(&["BDAY:1964-05-31"])));
+        assert_ne!(hash(&vcf(&["BDAY:1964-05-30"])), hash(&vcf(&["ANNIVERSARY:1964-05-30"])));
+        assert_ne!(hash(&vcf(&["BDAY:1964-05-30"])), hash(&vcf(&[])));
+        // Only date properties are normalised.
+        assert_ne!(hash(&vcf(&["NOTE:1964-05-30"])), hash(&vcf(&["NOTE:19640530"])));
+    }
+
+    #[test]
+    fn apple_sensitive_content_config_is_ignored() {
+        // Apple-private; Fastmail drops it on save.
+        assert_eq!(
+            hash(&vcf(&["FN:Jane", "VND-63-SENSITIVE-CONTENT-CONFIG:YnBsaXN0MDDUAQIDBAUGBwpY"])),
+            hash(&vcf(&["FN:Jane"]))
         );
     }
 

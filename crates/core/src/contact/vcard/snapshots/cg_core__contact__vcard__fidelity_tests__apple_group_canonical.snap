@@ -2,7 +2,7 @@
 source: crates/core/src/contact/vcard/fidelity_tests.rs
 expression: "card(APPLE_GROUP).canonical_form(HashOptions::default())"
 ---
-CANONICAL:1
+CANONICAL:2
 BEGIN:VCARD
 END:VCARD
 FN:Book Club
