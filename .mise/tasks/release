@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
 #MISE description="Create a release"
+#MISE dir="{{config_root}}"
 set -euo pipefail
 
-pushd .. >/dev/null
 VERSION="${1:?Usage: scripts/release.sh <version>}"
 
 # Validate format: must be v1.2.3
 if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Error: Version must be in the form v1.2.3 (got: $VERSION)"
-    exit 1
+  echo "Error: Version must be in the form v1.2.3 (got: $VERSION)"
+  exit 1
 fi
 
 BARE_VERSION="${VERSION#v}"
 
-# Ensure we are at the project root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR/.."
-
 # Ensure the tag doesn't already exist
 jj sync
 if git tag -l "$VERSION" | grep -q "^${VERSION}$"; then
-    echo "Error: Tag $VERSION already exists"
-    exit 1
+  echo "Error: Tag $VERSION already exists"
+  exit 1
 fi
 
 echo "==> Preparing release $VERSION"
@@ -64,4 +60,3 @@ jj sync
 git push --tags
 
 echo "==> Release $VERSION pushed. Monitor the GitHub Actions workflow for progress."
-popd >/dev/null
