@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use super::{Diagnostic, Op, PairPass, Skip};
+use super::{Diagnostic, Op, PairPass, Skip, SkipReason};
 use crate::{
     contact::{DisplayIdentity, Href, Side, Uid, VCard},
     state::ConflictOrigin,
@@ -77,6 +77,10 @@ pub struct BaselineReport {
     pub reuid: Vec<ReportPair>,
     pub by_identity: Vec<ReportPair>,
     pub skipped: Vec<Skip>,
+    /// CG-18: nameless cards not copied because they share an email or phone
+    /// with a card the other side holds (`SkipReason::LikelyDuplicate`).
+    /// `skipped` holds only the ambiguous skips.
+    pub likely_duplicates: Vec<Skip>,
     pub copies: Vec<ReportCopy>,
     pub unreadable: Vec<(Side, Href)>,
     /// Cards CG-6 held instead of syncing: `Diagnostic::DuplicateUid` and
@@ -97,10 +101,10 @@ pub struct BaselineReport {
 
 impl BaselineReport {
     pub fn build(ops: &[Op], skips: &[Skip], diagnostics: &[Diagnostic]) -> Self {
-        let mut report = Self {
-            skipped: skips.to_vec(),
-            ..Self::default()
-        };
+        let mut report = Self::default();
+        let (likely_duplicates, skipped): (Vec<Skip>, Vec<Skip>) = skips.iter().cloned().partition(|skip| skip.reason == SkipReason::LikelyDuplicate);
+        report.likely_duplicates = likely_duplicates;
+        report.skipped = skipped;
         let mut replaced_fastmail_uids: HashSet<&Uid> = HashSet::new();
         for op in ops {
             match op {
@@ -186,6 +190,16 @@ impl fmt::Display for BaselineReport {
                 writeln!(f, ": {}", names.join("; "))?;
             }
         }
+        if !self.likely_duplicates.is_empty() {
+            writeln!(
+                f,
+                "Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or name it to sync it):"
+            )?;
+            for skip in &self.likely_duplicates {
+                let like: Vec<String> = skip.candidates.iter().map(ToString::to_string).collect();
+                writeln!(f, "  {} {} uid={}: like {}", skip.side, skip.identity, skip.uid, like.join("; "))?;
+            }
+        }
         section(f, "To copy:", &self.copies)?;
         if !self.unreadable.is_empty() {
             writeln!(f, "Unreadable (their counterparts may be copied):")?;
@@ -235,8 +249,44 @@ mod tests {
     use super::*;
     use crate::{
         contact::{ETag, VCardError},
-        sync::fixtures::card_with,
+        sync::fixtures::{card_with, res},
     };
+
+    fn skip(side: Side, uid: &str, identity: &str, reason: SkipReason, candidates: &[&str]) -> Skip {
+        Skip {
+            side,
+            resource: res(&format!("/{side}/{uid}.vcf"), "e"),
+            uid: Uid::from(uid),
+            content_hash: crate::sync::fixtures::card(uid, "x").canonical_hash(crate::sync::SYNC_HASH),
+            candidate_count: u32::try_from(candidates.len()).unwrap(),
+            identity: crate::sync::fixtures::card_with(uid, "", &format!("ORG:{identity}\r\n")).display_identity(),
+            candidates: candidates
+                .iter()
+                .map(|name| crate::sync::fixtures::card("c", name).display_identity())
+                .collect(),
+            reason,
+        }
+    }
+
+    #[test]
+    fn likely_duplicates_have_their_own_section() {
+        let skips = vec![
+            skip(Side::Fastmail, "fm-2", "KW pharmacy", SkipReason::LikelyDuplicate, &["KW pharmacy"]),
+            skip(Side::ICloud, "ic-9", "Acme", SkipReason::Ambiguous, &["Acme Sales"]),
+        ];
+
+        let report = BaselineReport::build(&[], &skips, &[]);
+
+        assert_eq!(report.likely_duplicates.len(), 1);
+        assert_eq!(report.skipped.len(), 1);
+        insta::assert_snapshot!(report.to_string(), @r"
+        in sync: 0, conflicts: 0, re-UID'd: 0, paired by identity: 0, skipped: 1, to copy: 0
+        Skipped, never guessed (edit either card to resolve):
+          icloud <no name> (Acme): 1 candidates: Acme Sales
+        Likely duplicates, not copied (no name; shares an email or phone with a contact on the other side; delete it, or name it to sync it):
+          fastmail <no name> (KW pharmacy) uid=fm-2: like KW pharmacy
+        ");
+    }
 
     #[test]
     fn held_section_lists_duplicate_and_reuid_diagnostics() {

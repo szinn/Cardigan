@@ -841,6 +841,34 @@ async fn skips_are_stored_every_cycle() {
 }
 
 #[tokio::test]
+async fn a_nameless_duplicate_of_a_named_card_is_not_copied() {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let h = Harness::new(Side::ICloud);
+    let named = vcard("u1", "KW pharmacy", "TEL:+1 555 0100\r\n");
+    h.icloud.external_put("/card/kw.vcf", named.clone());
+    h.fastmail.external_put("/dav/kw.vcf", named);
+    h.fastmail
+        .external_put("/dav/kw-dup.vcf", vcard("fm-2", "", "ORG:KW pharmacy\r\nTEL:+1 555 0100\r\n"));
+
+    let summary = h.applied().await;
+
+    assert_eq!((summary.adopted, summary.skipped, summary.to_icloud.added), (1, 1, 0));
+    assert_eq!(h.writes(), 0, "the duplicate is not copied to iCloud");
+    assert_eq!(h.state.skips().len(), 1);
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("likely a duplicate"), "{logs}");
+    assert!(!logs.contains("555"), "a phone number leaked into the logs:\n{logs}");
+}
+
+#[tokio::test]
 #[allow(
     clippy::assert_is_empty,
     reason = "asserting on is_empty() reads clearer than assert_eq! against an empty array literal"

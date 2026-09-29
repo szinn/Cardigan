@@ -15,7 +15,7 @@ use crate::{
     addressbook::SyncToken,
     contact::{CANONICAL_VERSION, ETag, Href, Side, Uid},
     state::{CardFailure, ContactState, FailedCard, FailureOp, FailureReason, NewBaselineSkip},
-    sync::{CyclePlan, Diagnostic, Op},
+    sync::{CyclePlan, Diagnostic, Op, SkipReason},
     with_transaction,
 };
 
@@ -300,7 +300,14 @@ fn log_cycle(cycle: &CyclePlan, summary: &CycleSummary) {
     }
     for skip in &cycle.skips {
         let record = skip.identity.to_string();
-        if skip.identity.name().is_none() && !skip.candidates.is_empty() {
+        if skip.reason == SkipReason::LikelyDuplicate {
+            tracing::warn!(
+                record = ?record,
+                uid = %skip.uid,
+                side = %skip.side,
+                "not synced: a contact with no name shares an email or phone with a contact on the other side, so it is likely a duplicate; delete it, or name it to sync it"
+            );
+        } else if skip.identity.name().is_none() && !skip.candidates.is_empty() {
             tracing::warn!(
                 record = ?record,
                 uid = %skip.uid,
