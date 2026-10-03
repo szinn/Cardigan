@@ -47,6 +47,7 @@ impl<'a> Run<'a> {
             | Op::Update { synced, .. }
             | Op::Conflict { synced, .. }
             | Op::Resurrect { synced, .. }
+            | Op::CopyGroup { synced, .. }
             | Op::Adopt { synced, .. }
             | Op::Recreate { synced, .. }
             | Op::Refresh { synced: Some(synced), .. } => Some(&synced.card),

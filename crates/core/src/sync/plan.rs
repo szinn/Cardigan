@@ -139,6 +139,22 @@ pub enum Op {
     /// `synced.body()` to `to` at a new href (`If-None-Match: *`), then update
     /// the row.
     Resurrect { uid: Uid, to: Side, source: Resource, synced: SyncedCard },
+    /// CG-14: a Fastmail-only Apple group being copied to iCloud whose
+    /// members include Fastmail UIDs that pairing replaced. PUT `rewritten`
+    /// (the Fastmail card with those members renamed, its photo kept) over
+    /// `source` (`If-Match`), then PUT `synced.body()` to iCloud at a new
+    /// href (`If-None-Match: *`), then add the state row. Fastmail goes
+    /// first: if the iCloud create then fails, the next cycle copies a group
+    /// that is already right; the other order could push the stale members
+    /// back.
+    CopyGroup {
+        uid: Uid,
+        source: Resource,
+        rewritten: VCard,
+        synced: SyncedCard,
+        /// Member lines rewritten, for the op line.
+        relinked: usize,
+    },
     /// The same card on both sides with no state row (crash recovery, or
     /// pairing pass 1): add the row. No server write.
     Adopt {
@@ -205,6 +221,7 @@ impl Op {
             | Self::Delete { uid, .. }
             | Self::Conflict { uid, .. }
             | Self::Resurrect { uid, .. }
+            | Self::CopyGroup { uid, .. }
             | Self::Adopt { uid, .. }
             | Self::Recreate { uid, .. }
             | Self::Refresh { uid, .. }
@@ -216,7 +233,7 @@ impl Op {
     /// count in the cycle summary.
     pub fn log_op(&self) -> Option<&'static str> {
         match self {
-            Self::Create { .. } | Self::Resurrect { .. } => Some("add"),
+            Self::Create { .. } | Self::Resurrect { .. } | Self::CopyGroup { .. } => Some("add"),
             Self::Update { .. } | Self::Conflict { .. } | Self::Recreate { .. } => Some("update"),
             Self::Delete { .. } => Some("remove"),
             Self::Adopt { .. } | Self::Refresh { .. } | Self::Forget { .. } => None,
@@ -251,6 +268,7 @@ impl fmt::Display for Op {
                 kept(synced)
             ),
             Self::Resurrect { uid, to, source, synced } => write!(f, "resurrect {to} uid={uid} from={}{}", source.href, kept(synced)),
+            Self::CopyGroup { uid, source, relinked, .. } => write!(f, "copy-group icloud uid={uid} from={source} relinked={relinked}"),
             Self::Adopt { uid, icloud, fastmail, synced } => write!(f, "adopt uid={uid} icloud={icloud} fastmail={fastmail}{}", kept(synced)),
             Self::Refresh { uid, icloud, fastmail, synced } => {
                 write!(f, "refresh uid={uid}")?;
@@ -431,6 +449,13 @@ mod tests {
                     source: res("/f/u1.vcf", "f2"),
                     synced: plain("u1"),
                 },
+                Op::CopyGroup {
+                    uid: u1.clone(),
+                    source: res("/f/u1.vcf", "f2"),
+                    rewritten: plain("u1").card,
+                    synced: plain("u1"),
+                    relinked: 2,
+                },
                 Op::Adopt {
                     uid: u1.clone(),
                     icloud: res("/i/u1.vcf", "i1"),
@@ -492,6 +517,7 @@ mod tests {
         delete icloud uid=u1 /i/u1.vcf@i1
         conflict(sync) icloud wins uid=u1 → fastmail /f/u1.vcf@f2
         resurrect icloud uid=u1 from=/f/u1.vcf
+        copy-group icloud uid=u1 from=/f/u1.vcf@f2 relinked=2
         adopt uid=u1 icloud=/i/u1.vcf@i1 fastmail=/f/u1.vcf@f1
         refresh uid=u1 icloud=/i/u1.vcf@i2 content
         forget uid=u1
@@ -537,6 +563,14 @@ mod tests {
             .log_op(),
             Some("add")
         );
+        let copy = Op::CopyGroup {
+            uid: u1.clone(),
+            source: res("/f/u1.vcf", "f1"),
+            rewritten: plain("u1").card,
+            synced: plain("u1"),
+            relinked: 1,
+        };
+        assert_eq!((copy.log_op(), copy.uid()), (Some("add"), &u1));
         assert_eq!(Op::Forget { uid: u1.clone() }.uid(), &u1);
     }
 

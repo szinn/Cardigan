@@ -83,6 +83,10 @@ impl CycleSummary {
     pub(super) fn applied(&mut self, op: &Op) {
         match op {
             Op::Create { to, .. } | Op::Resurrect { to, .. } => self.toward_mut(*to).added += 1,
+            Op::CopyGroup { .. } => {
+                self.to_icloud.added += 1;
+                self.to_fastmail.updated += 1;
+            }
             Op::Update { to, .. } => self.toward_mut(*to).updated += 1,
             Op::Delete { on, .. } => self.toward_mut(*on).removed += 1,
             Op::Conflict { winner, .. } => self.toward_mut(winner.other()).conflicts += 1,
@@ -137,6 +141,7 @@ pub(super) fn target_side(op: &Op) -> Option<Side> {
         Op::Create { to, .. } | Op::Update { to, .. } | Op::Resurrect { to, .. } => Some(*to),
         Op::Delete { on, .. } => Some(*on),
         Op::Conflict { winner, .. } => Some(winner.other()),
+        Op::CopyGroup { .. } => Some(Side::ICloud),
         Op::Recreate { .. } => Some(Side::Fastmail),
         Op::Adopt { .. } | Op::Refresh { .. } | Op::Forget { .. } => None,
     }
@@ -168,5 +173,25 @@ mod tests {
 
         insta::assert_snapshot!(summary.to_string(), @"icloud→fastmail: fetched 0, added 2, updated 0, removed 0, conflicts 0, errors 0; fastmail→icloud: fetched 0, added 0, updated 0, removed 0, conflicts 0, errors 1; adopted 1, refreshed 0, forgotten 0, state errors 0, deferred 0, held deletes 0, skipped 0, persistent failures 0");
         assert_eq!(direction(Side::ICloud), "fastmail→icloud");
+    }
+
+    #[test]
+    fn a_group_copy_counts_as_an_icloud_add_and_a_fastmail_update() {
+        let card = crate::contact::VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g1\r\nFN:Team\r\nEND:VCARD\r\n").unwrap();
+        let op = Op::CopyGroup {
+            uid: crate::contact::Uid::from("g1"),
+            source: crate::sync::Resource {
+                href: crate::contact::Href::from("/dav/g.vcf"),
+                etag: crate::contact::ETag::from("f1"),
+            },
+            rewritten: card.clone(),
+            synced: crate::sync::SyncedCard::recorded(&card),
+            relinked: 1,
+        };
+
+        let summary = CycleSummary::planned(std::slice::from_ref(&op));
+
+        assert_eq!((summary.to_icloud.added, summary.to_fastmail.updated), (1, 1));
+        assert_eq!(target_side(&op), Some(Side::ICloud));
     }
 }

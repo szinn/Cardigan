@@ -109,6 +109,23 @@ impl SyncService {
                 self.write_state(StateWrite::pushed(uid, (loser, resource), source.clone(), synced, clear), now)
                     .await
             }
+            // Fastmail first (CG-14 triage F3): a failed iCloud create then
+            // leaves an already-relinked group for the next cycle to copy.
+            Op::CopyGroup {
+                uid,
+                source,
+                rewritten,
+                synced,
+                ..
+            } => {
+                let precondition = Precondition::IfMatch(source.etag.clone());
+                let fastmail_now = self.write_card(Side::Fastmail, source.href.clone(), rewritten, precondition, written).await?;
+                let href = mint_href(&collections.icloud.addressbook_url, uid);
+                let icloud_now = self.write_card(Side::ICloud, href, synced.body(), Precondition::IfNoneMatch, written).await?;
+                let clear = vec![(Side::Fastmail, source.href.clone())];
+                self.write_state(StateWrite::pushed(uid, (Side::ICloud, icloud_now), fastmail_now, synced, clear), now)
+                    .await
+            }
             // Op::Recreate's documented order, with the journal (CG-16)
             // before the DELETE.
             Op::Recreate {
@@ -346,7 +363,7 @@ pub(super) fn holds_on_abort(op: &Op) -> bool {
 /// copy it back, duplicating the contact.
 pub(super) fn failed_cards(op: &Op, written: &[(Side, Href, Option<ETag>)], reason: FailureReason) -> Vec<FailedCard> {
     let failure_op = match op {
-        Op::Create { .. } | Op::Resurrect { .. } => FailureOp::Create,
+        Op::Create { .. } | Op::Resurrect { .. } | Op::CopyGroup { .. } => FailureOp::Create,
         Op::Delete { .. } => FailureOp::Delete,
         _ => FailureOp::Update,
     };
@@ -363,6 +380,7 @@ pub(super) fn failed_cards(op: &Op, written: &[(Side, Href, Option<ETag>)], reas
         Op::Create { to, source, .. } | Op::Resurrect { to, source, .. } | Op::Update { to, source, .. } => {
             vec![card(to.other(), &source.href, Some(source.etag.clone()))]
         }
+        Op::CopyGroup { source, .. } => vec![card(Side::Fastmail, &source.href, Some(source.etag.clone()))],
         Op::Delete { on, target, .. } => vec![card(*on, &target.href, Some(target.etag.clone()))],
         Op::Conflict {
             origin,
@@ -422,6 +440,25 @@ mod tests {
             .iter()
             .map(|card| (card.side, card.href.as_str(), card.etag.as_ref().map(ETag::as_str)))
             .collect()
+    }
+
+    #[test]
+    fn a_failed_group_copy_holds_the_fastmail_group_at_its_newest_etag() {
+        let op = Op::CopyGroup {
+            uid: Uid::from("g1"),
+            source: res("/dav/g.vcf", "f1"),
+            rewritten: synced().card,
+            synced: synced(),
+            relinked: 1,
+        };
+
+        let before_write = failed_cards(&op, &[], FailureReason::Rejected);
+        assert_eq!(keys(&before_write), [(Side::Fastmail, "/dav/g.vcf", Some("f1"))]);
+        assert_eq!(before_write[0].op, FailureOp::Create);
+
+        let after_fastmail = failed_cards(&op, &[written(Side::Fastmail, "/dav/g.vcf", "f2")], FailureReason::Rejected);
+        assert_eq!(keys(&after_fastmail), [(Side::Fastmail, "/dav/g.vcf", Some("f2"))]);
+        assert!(!holds_on_abort(&op), "an unsynced group is never held on abort");
     }
 
     #[test]

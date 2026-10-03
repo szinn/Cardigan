@@ -190,6 +190,7 @@ impl BaselineReport {
                     }
                 }
                 Op::Create { uid, to, synced, .. } => report.copies.push(ReportCopy::new(uid, &synced.card, *to)),
+                Op::CopyGroup { uid, synced, .. } => report.copies.push(ReportCopy::new(uid, &synced.card, Side::ICloud)),
                 _ => {}
             }
         }
