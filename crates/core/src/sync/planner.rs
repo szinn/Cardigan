@@ -16,6 +16,10 @@ pub struct PlanInput<'a> {
     pub state: &'a [ContactState],
     /// `CARDIGAN_CONFLICT_WINNER`.
     pub winner: ConflictWinner,
+    /// (old Fastmail UID, iCloud UID) for each Recreate the journal replay
+    /// finished before this cycle (CG-14). Planning ignores it; `plan_cycle`
+    /// relinks groups with it. `&[]` when nothing was replayed.
+    pub replayed: &'a [(Uid, Uid)],
 }
 
 /// The planner's result: ops for synced contacts, and the cards pairing
@@ -250,6 +254,7 @@ mod tests {
             fastmail,
             state,
             winner,
+            replayed: &[],
         }
     }
 

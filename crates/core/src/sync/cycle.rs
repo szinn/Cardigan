@@ -1,4 +1,4 @@
-use super::{BaselineReport, KnownCards, Plan, PlanInput, Planned, Skip, guard, pairing, planner};
+use super::{BaselineReport, KnownCards, Plan, PlanInput, Planned, Skip, guard, pairing, planner, relink};
 
 /// One cycle's complete plan: the planner's ops for synced contacts, then
 /// pairing's for unsynced cards.
@@ -11,14 +11,17 @@ pub struct CyclePlan {
 }
 
 /// Runs the planner, holds cross-pair deletes (`hold_cross_deletes`), and then
-/// runs pairing. CG-8 calls this every cycle (an empty state store makes it the
-/// initial baseline) and checks `check_deletions` on the result before writing.
+/// runs pairing and relinks the groups it copies (CG-14). CG-8 calls this every
+/// cycle (an empty state store makes it the initial baseline) and checks
+/// `check_deletions` on the result before writing.
 pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     let Planned { mut plan, unsynced } = planner::plan(input);
     guard::hold_cross_deletes(&mut plan, input.state);
     let known = KnownCards::collect(input.icloud, input.fastmail, input.state);
     let paired = pairing::pair(&unsynced, &known, input.winner);
     plan.ops.extend(paired.ops);
+    let aliases = relink::aliases(&plan.ops, input.replayed);
+    relink::relink_groups(&mut plan.ops, &aliases, input.fastmail);
     let mut report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
     report.synced_duplicates = super::synced_duplicates(input.state);
     CyclePlan {
@@ -57,6 +60,7 @@ mod tests {
             fastmail,
             state,
             winner,
+            replayed: &[],
         })
     }
 
@@ -145,7 +149,7 @@ mod tests {
         recreate(identity) uid=ic-4 fastmail /f/fm-4.vcf@f-fm-4 was fm-4 icloud wins
         create fastmail uid=ic-6 from=/i/ic-6.vcf
         create icloud uid=fm-7 from=/f/fm-7.vcf
-        create icloud uid=fm-g from=/f/fm-g.vcf
+        copy-group icloud uid=fm-g from=/f/fm-g.vcf@f-fm-g relinked=1
         ! unreadable fastmail /f/bad.vcf@f-bad: vCard has no UID
         ");
         let report = planned.report.to_string();
@@ -169,8 +173,6 @@ mod tests {
           Family uid=fm-g → icloud
         Unreadable (their counterparts may be copied):
           fastmail /f/bad.vcf
-        Groups listing re-UID'd members (membership stale until CG-14):
-          Family uid=fm-g → icloud
         ");
         assert_eq!(planned.skips.len(), 2);
     }

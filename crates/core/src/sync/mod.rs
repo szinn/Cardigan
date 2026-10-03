@@ -9,6 +9,7 @@ mod guard;
 mod pairing;
 mod plan;
 mod planner;
+mod relink;
 mod report;
 mod sides;
 mod snapshot;

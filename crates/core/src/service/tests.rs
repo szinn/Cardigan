@@ -1347,3 +1347,55 @@ async fn a_pending_row_keeps_the_cycle_from_going_idle() {
         "the iCloud copy, not the journaled bytes: {body}"
     );
 }
+
+const FAMILY_OF_FM1: &str = "X-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:fm-1\r\n";
+const FAMILY_OF_IC1: &str = "X-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:ic-1\r\n";
+
+#[tokio::test]
+async fn a_copied_group_lists_its_members_under_their_new_uids() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.fastmail.external_put("/dav/family.vcf", vcard("fm-g", "Family", FAMILY_OF_FM1));
+
+    let summary = h.applied().await;
+
+    let relinked = vcard("fm-g", "Family", FAMILY_OF_IC1).into_bytes();
+    assert_eq!(h.fastmail.card(&href("/dav/family.vcf")).unwrap().1, relinked, "fixed in place on Fastmail");
+    assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
+    assert_eq!((summary.to_icloud.added, summary.to_fastmail.updated), (1, 2), "the recreate and the group");
+    let writes = h.fastmail.writes();
+    assert!(
+        matches!(
+            writes.last(),
+            Some(Write::Put { href, precondition: Precondition::IfMatch(_), .. }) if href.as_str() == "/dav/family.vcf"
+        ),
+        "the group goes back over its own href after the member's recreate: {writes:?}"
+    );
+    assert_eq!(h.state.contacts().len(), 2);
+
+    let before = h.writes();
+    assert_eq!(h.applied().await, CycleSummary::default(), "both writes come back as echoes");
+    assert_eq!(h.writes(), before);
+}
+
+#[tokio::test]
+async fn a_failed_icloud_copy_leaves_the_fastmail_group_already_relinked() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.fastmail.external_put("/dav/family.vcf", vcard("fm-g", "Family", FAMILY_OF_FM1));
+    h.icloud.fail_next(BookOp::Put, AddressBookError::Permanent("400 Bad Request".into()));
+
+    let summary = h.applied().await;
+
+    let relinked = vcard("fm-g", "Family", FAMILY_OF_IC1).into_bytes();
+    assert_eq!(summary.to_icloud.errors, 1);
+    assert_eq!(h.fastmail.card(&href("/dav/family.vcf")).unwrap().1, relinked, "Fastmail is fixed first");
+    assert!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).is_none());
+
+    h.advance(TimeDelta::seconds(61));
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_icloud.added, 1, "a plain copy of the already-fixed group");
+    assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
+    assert_eq!(h.state.contacts().len(), 2);
+}

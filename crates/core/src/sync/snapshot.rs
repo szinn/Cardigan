@@ -37,6 +37,10 @@ impl Snapshot {
         self.entries.insert(href, entry);
     }
 
+    pub fn get(&self, href: &Href) -> Option<&Entry> {
+        self.entries.get(href)
+    }
+
     /// Entries in href order.
     pub fn entries(&self) -> impl Iterator<Item = (&Href, &Entry)> {
         self.entries.iter()

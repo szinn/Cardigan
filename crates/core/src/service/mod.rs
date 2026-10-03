@@ -181,6 +181,7 @@ impl SyncService {
             fastmail: &built.fastmail,
             state: &stored.contacts,
             winner: self.winner,
+            replayed: &[],
         });
         let blocked = check_deletions(&cycle.plan, stored.contacts.len()).err();
         if dry_run {
