@@ -31,7 +31,10 @@ impl SyncService {
     ///
     /// Returns (old Fastmail UID, iCloud UID) for every row whose old
     /// Fastmail card is gone: that UID is dead and the iCloud UID is the
-    /// contact's only name, whichever way the row ended. `plan_cycle` relinks
+    /// contact's only name, whichever way the row ended. That includes a row
+    /// dropped because the contact was deleted on iCloud: the group is then
+    /// rewritten to a UID iCloud does not hold, and the report flags it.
+    /// `plan_cycle` relinks
     /// groups with it (CG-14).
     pub(super) async fn replay(&self, pending: &[PendingRecreate], collections: &Collections) -> Result<Vec<(Uid, Uid)>, Error> {
         let fastmail_listing = list_side(&*self.fastmail, &collections.fastmail)

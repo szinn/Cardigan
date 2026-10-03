@@ -1396,8 +1396,34 @@ async fn a_failed_icloud_copy_leaves_the_fastmail_group_already_relinked() {
     let summary = h.applied().await;
 
     assert_eq!(summary.to_icloud.added, 1, "a plain copy of the already-fixed group");
+    assert_eq!(summary.to_fastmail.updated, 0, "a plain create, not a copy-group");
     assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
     assert_eq!(h.state.contacts().len(), 2);
+}
+
+#[tokio::test]
+async fn a_failed_member_recreate_still_relinks_the_group_and_heals_later() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.fastmail.external_put("/dav/family.vcf", vcard("fm-g", "Family", FAMILY_OF_FM1));
+    h.fastmail.fail_next(BookOp::Delete, AddressBookError::Permanent("400 Bad Request".into()));
+
+    let first = h.applied().await;
+
+    let relinked = vcard("fm-g", "Family", FAMILY_OF_IC1).into_bytes();
+    assert_eq!(h.fastmail.card(&href("/dav/family.vcf")).unwrap().1, relinked, "{first:?}");
+    assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_some(), "the failed DELETE left fm-1 in place");
+
+    h.advance(TimeDelta::seconds(61));
+    h.applied().await;
+    h.settle().await;
+
+    assert!(h.fastmail.card(&href("/dav/ann.vcf")).is_none(), "fm-1 is gone once the recreate succeeds");
+    assert!(h.fastmail.card(&minted(FASTMAIL_URL, "ic-1")).is_some());
+    assert_eq!(h.state.contacts().len(), 2);
+    assert_eq!(h.fastmail.card(&href("/dav/family.vcf")).unwrap().1, relinked);
+    assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
 }
 
 #[tokio::test]

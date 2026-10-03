@@ -294,8 +294,12 @@ impl SyncService {
 /// The cycle's log lines beyond the per-op ones (Decision 12).
 fn log_cycle(cycle: &CyclePlan, summary: &CycleSummary) {
     let report = &cycle.report;
-    let paired =
-        !(report.in_sync.is_empty() && report.conflicts.is_empty() && report.reuid.is_empty() && report.by_identity.is_empty() && report.copies.is_empty());
+    let paired = !(report.in_sync.is_empty()
+        && report.conflicts.is_empty()
+        && report.reuid.is_empty()
+        && report.by_identity.is_empty()
+        && report.copies.is_empty()
+        && report.groups_with_unmapped_members.is_empty());
     if paired {
         tracing::info!("baseline pairing:\n{report}");
     }

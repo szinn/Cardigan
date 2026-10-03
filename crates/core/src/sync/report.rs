@@ -335,10 +335,15 @@ fn section<T: fmt::Display>(f: &mut fmt::Formatter<'_>, title: &str, lines: &[T]
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::{
         contact::{ETag, VCardError},
-        sync::fixtures::{card_with, res, row},
+        sync::{
+            SyncedCard,
+            fixtures::{card, card_with, res, row},
+        },
     };
 
     fn skip(side: Side, uid: &str, identity: &str, reason: SkipReason, candidates: &[&str]) -> Skip {
@@ -493,5 +498,110 @@ mod tests {
         let lines: Vec<String> = synced_duplicates(&state).iter().map(ToString::to_string).collect();
 
         assert_eq!(lines, ["<no name> (KW pharmacy) uid=u1: like <no name> (KW pharmacy) uid=u2"]);
+    }
+
+    fn group(uid: &str, members: &[&str]) -> VCard {
+        let lines = members.iter().fold(String::new(), |mut lines, m| {
+            let _ = write!(lines, "X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:{m}\r\n");
+            lines
+        });
+        card_with(uid, "G", &format!("X-ADDRESSBOOKSERVER-KIND:group\r\n{lines}"))
+    }
+
+    fn create_group(card: &VCard) -> Op {
+        Op::Create {
+            uid: card.uid().clone(),
+            to: Side::ICloud,
+            source: res("/f/g.vcf", "f"),
+            synced: SyncedCard::recorded(card),
+        }
+    }
+
+    fn conflict_group(card: &VCard, winner: Side) -> Op {
+        Op::Conflict {
+            uid: card.uid().clone(),
+            origin: ConflictOrigin::Sync,
+            winner,
+            target: res("/i/g.vcf", "i"),
+            source: res("/f/g.vcf", "f"),
+            synced: SyncedCard::recorded(card),
+            icloud_card: card.clone(),
+            fastmail_card: card.clone(),
+        }
+    }
+
+    /// (name, ops, UIDs in state, flagged group UIDs)
+    type Case<'a> = (&'a str, Vec<Op>, &'a [&'a str], &'a [&'a str]);
+
+    #[test]
+    fn groups_with_unmapped_members_follows_the_icloud_set_after_the_cycle() {
+        let other = || res("/x.vcf", "x");
+        let delete = |uid: &str| Op::Delete {
+            uid: Uid::from(uid),
+            on: Side::ICloud,
+            target: other(),
+        };
+        let g_m1 = group("g", &["m1"]);
+        let g_inner = group("g", &["inner"]);
+        let inner = group("inner", &["s"]);
+        let recreate = Op::Recreate {
+            uid: Uid::from("g"),
+            pass: PairPass::Content,
+            icloud: other(),
+            old_fastmail: other(),
+            fastmail_uid: Uid::from("old"),
+            put_icloud: None,
+            create_fastmail: g_m1.clone(),
+            synced: SyncedCard::recorded(&g_m1),
+            conflict: None,
+        };
+        let update = Op::Update {
+            uid: Uid::from("g"),
+            to: Side::ICloud,
+            target: other(),
+            source: other(),
+            synced: SyncedCard::recorded(&g_m1),
+        };
+        let resurrect = Op::Resurrect {
+            uid: Uid::from("inner"),
+            to: Side::ICloud,
+            source: other(),
+            synced: SyncedCard::recorded(&card("inner", "I")),
+        };
+        let copy_group = Op::CopyGroup {
+            uid: Uid::from("inner"),
+            source: other(),
+            rewritten: inner.clone(),
+            synced: SyncedCard::recorded(&inner),
+            relinked: 1,
+        };
+        // (name, ops, UIDs in state, flagged group UIDs)
+        let cases: Vec<Case> = vec![
+            ("fastmail-won conflict, unmapped", vec![conflict_group(&g_m1, Side::Fastmail)], &[], &["g"]),
+            ("icloud-won conflict, unmapped", vec![conflict_group(&g_m1, Side::ICloud)], &[], &[]),
+            ("recreate, unmapped", vec![recreate], &[], &["g"]),
+            ("update, unmapped", vec![update], &[], &[]),
+            ("resurrect puts the member on icloud", vec![resurrect, create_group(&g_inner)], &[], &[]),
+            ("copy-group puts the member on icloud", vec![copy_group, create_group(&g_inner)], &["s"], &[]),
+            ("delete removes a state member", vec![delete("m1"), create_group(&g_m1)], &["m1"], &["g"]),
+            (
+                "forget removes a state member",
+                vec![Op::Forget { uid: Uid::from("m1") }, create_group(&g_m1)],
+                &["m1"],
+                &["g"],
+            ),
+            ("every member resolves", vec![create_group(&g_m1)], &["m1"], &[]),
+        ];
+        for (name, ops, in_state, expected) in cases {
+            let state: Vec<_> = (1..)
+                .zip(in_state)
+                .map(|(id, uid)| row(id, &card(uid, "M"), ("/i/x.vcf", "i"), ("/f/x.vcf", "f")))
+                .collect();
+
+            let flagged = groups_with_unmapped_members(&ops, &Snapshot::default(), &state);
+
+            let flagged: Vec<&str> = flagged.iter().map(|g| g.uid.as_str()).collect();
+            assert_eq!(flagged, expected, "{name}");
+        }
     }
 }

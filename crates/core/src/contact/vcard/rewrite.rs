@@ -33,8 +33,9 @@ impl VCard {
     /// whose `<old>` is a key of `aliases` naming its new UID instead (CG-14).
     /// Only the UID changes: the group, name, parameters, the `urn:uuid:`
     /// prefix as written and the line ending stay; a folded member line
-    /// comes back unfolded. Members are matched exactly as `member_uids`
-    /// matches them. Every other byte is unchanged.
+    /// comes back unfolded, and any whitespace after the UID is not kept.
+    /// Members are matched exactly as `member_uids` matches them. Every
+    /// other byte is unchanged.
     #[must_use]
     pub fn with_member_uids(&self, aliases: &HashMap<Uid, Uid>) -> Self {
         let mut raw = Vec::with_capacity(self.raw.len());
@@ -255,5 +256,19 @@ mod tests {
         let expected: &[u8] = b"BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g1\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:ic-1\r\nEND:VCARD\r\n";
         assert_eq!(rewritten.as_bytes(), expected);
         assert_eq!(rewritten.member_uids(), [uid("ic-1")]);
+    }
+
+    #[test]
+    fn with_member_uids_rewrites_two_mapped_members_around_an_unmapped_one() {
+        #[rustfmt::skip]
+        let raw = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g1\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:fm-1\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:keep\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:fm-2\r\nEND:VCARD\r\n";
+        #[rustfmt::skip]
+        let expected = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:g1\r\nX-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:ic-1\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:keep\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:ic-2\r\nEND:VCARD\r\n";
+        let group = VCard::parse(raw).unwrap();
+
+        let rewritten = group.with_member_uids(&aliases(&[("fm-1", "ic-1"), ("fm-2", "ic-2")]));
+
+        assert_eq!(rewritten.as_bytes(), expected.as_bytes());
+        assert_eq!(rewritten.member_uids(), [uid("ic-1"), uid("keep"), uid("ic-2")]);
     }
 }
