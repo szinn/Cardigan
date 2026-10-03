@@ -1399,3 +1399,27 @@ async fn a_failed_icloud_copy_leaves_the_fastmail_group_already_relinked() {
     assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
     assert_eq!(h.state.contacts().len(), 2);
 }
+
+#[tokio::test]
+async fn a_group_copied_after_a_replayed_recreate_lists_the_new_uid() {
+    let h = Harness::new(Side::ICloud);
+    seed_content_pair(&h, "");
+    h.fastmail.external_put("/dav/family.vcf", vcard("fm-g", "Family", FAMILY_OF_FM1));
+    interrupt_after_the_delete(&h).await;
+    let writes = h.writes();
+
+    let (preview, _) = h.dry_run().await;
+
+    assert_eq!(h.writes(), writes, "dry-run neither replays nor writes");
+    assert!(preview.plan.to_string().contains("create icloud uid=fm-g"), "{}", preview.plan);
+    let flagged: Vec<&str> = preview.report.groups_with_unmapped_members.iter().map(|g| g.uid.as_str()).collect();
+    assert_eq!(flagged, ["fm-g"], "without replay, fm-1 is not on iCloud");
+
+    h.applied().await;
+
+    let relinked = vcard("fm-g", "Family", FAMILY_OF_IC1).into_bytes();
+    assert_eq!(h.fastmail.card(&href("/dav/family.vcf")).unwrap().1, relinked);
+    assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
+    assert_eq!(h.state.pending_recreates(), []);
+    assert_eq!(h.state.contacts().len(), 2);
+}

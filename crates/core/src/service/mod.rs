@@ -168,9 +168,11 @@ impl SyncService {
         let stored = if request.reset && dry_run { Stored::default() } else { self.load().await? };
         // An interrupted Recreate must be finished before pairing sees an
         // iCloud-only card and copies it (CG-16). Dry-run never replays.
-        if !dry_run && !stored.pending.is_empty() {
-            self.replay(&stored.pending, &collections).await?;
-        }
+        let replayed = if !dry_run && !stored.pending.is_empty() {
+            self.replay(&stored.pending, &collections).await?
+        } else {
+            Vec::new()
+        };
         if !dry_run && self.idle(&stored, &collections, now).await? {
             return Ok(CycleOutcome::Idle);
         }
@@ -181,7 +183,7 @@ impl SyncService {
             fastmail: &built.fastmail,
             state: &stored.contacts,
             winner: self.winner,
-            replayed: &[],
+            replayed: &replayed,
         });
         let blocked = check_deletions(&cycle.plan, stored.contacts.len()).err();
         if dry_run {

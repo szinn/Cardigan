@@ -24,6 +24,7 @@ pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     relink::relink_groups(&mut plan.ops, &aliases, input.fastmail);
     let mut report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
     report.synced_duplicates = super::synced_duplicates(input.state);
+    report.groups_with_unmapped_members = super::report::groups_with_unmapped_members(&plan.ops, input.icloud, input.state);
     CyclePlan {
         plan,
         skips: paired.skips,
@@ -312,6 +313,30 @@ mod tests {
             planned.report.to_string().contains("  <no name> (KW pharmacy) uid=u2: like KW pharmacy uid=u1"),
             "{}",
             planned.report
+        );
+    }
+
+    #[test]
+    fn a_group_listing_a_skipped_member_is_reported() {
+        let icloud = side("i", &[card_with("ic-5", "Sam Poe", "EMAIL:sam@one.example\r\n")]);
+        let fastmail = side(
+            "f",
+            &[
+                card_with("fm-5", "Sam Poe", "EMAIL:sam@two.example\r\n"),
+                card_with("fm-c", "Club", "X-ADDRESSBOOKSERVER-KIND:group\r\nX-ADDRESSBOOKSERVER-MEMBER:urn:uuid:fm-5\r\n"),
+            ],
+        );
+
+        let planned = cycle(&icloud, &fastmail, &[], Side::ICloud);
+
+        assert_eq!(planned.skips.len(), 2, "Sam Poe is ambiguous on both sides");
+        let flagged: Vec<&str> = planned.report.groups_with_unmapped_members.iter().map(|g| g.uid.as_str()).collect();
+        assert_eq!(flagged, ["fm-c"]);
+        assert!(
+            planned
+                .report
+                .to_string()
+                .contains("Groups with unmapped members (not on iCloud after this cycle; fix by hand):\n  Club uid=fm-c \u{2192} icloud\n")
         );
     }
 }

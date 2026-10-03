@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use super::{Diagnostic, Op, PairPass, Skip, SkipReason};
+use super::{Diagnostic, Entry, Op, PairPass, Skip, SkipReason, Snapshot};
 use crate::{
     contact::{DisplayIdentity, Href, MatchKeys, Side, Uid, VCard},
     state::{ConflictOrigin, ContactState},
@@ -121,6 +121,48 @@ pub fn synced_duplicates(state: &[ContactState]) -> Vec<ReportDuplicate> {
         .collect()
 }
 
+/// Groups `ops` write to iCloud (a copy, a Fastmail-won conflict, or a
+/// re-UID'd pair) that list a UID iCloud will not hold after this cycle:
+/// one not in state, not fetched on iCloud and not created there this
+/// cycle, or one this cycle deletes (CG-14 Decision 4).
+pub fn groups_with_unmapped_members(ops: &[Op], icloud: &Snapshot, state: &[ContactState]) -> Vec<ReportCopy> {
+    let mut on_icloud: HashSet<&Uid> = state.iter().map(|row| &row.uid).collect();
+    on_icloud.extend(icloud.entries().filter_map(|(_, entry)| match entry {
+        Entry::Fetched { card: Ok(card), .. } => Some(card.uid()),
+        _ => None,
+    }));
+    for op in ops {
+        match op {
+            Op::Create { uid, to: Side::ICloud, .. } | Op::Resurrect { uid, to: Side::ICloud, .. } | Op::CopyGroup { uid, .. } => {
+                on_icloud.insert(uid);
+            }
+            Op::Delete { uid, .. } | Op::Forget { uid } => {
+                on_icloud.remove(uid);
+            }
+            _ => {}
+        }
+    }
+    ops.iter()
+        .filter_map(|op| {
+            let (uid, card) = match op {
+                Op::Create {
+                    uid, to: Side::ICloud, synced, ..
+                }
+                | Op::CopyGroup { uid, synced, .. }
+                | Op::Conflict {
+                    uid,
+                    winner: Side::Fastmail,
+                    synced,
+                    ..
+                }
+                | Op::Recreate { uid, synced, .. } => (uid, &synced.card),
+                _ => return None,
+            };
+            (card.is_group() && card.member_uids().iter().any(|member| !on_icloud.contains(member))).then(|| ReportCopy::new(uid, card, Side::ICloud))
+        })
+        .collect()
+}
+
 /// What pairing will do this cycle, for `dry-run` and the cycle summary.
 /// Built from the plan alone, so a dry run and a real run report the same
 /// thing. PII-safe: names, organizations, UIDs and hrefs only.
@@ -145,12 +187,11 @@ pub struct BaselineReport {
     /// Deletes CG-17 held because they may remove one contact across two
     /// pairs (`Diagnostic::DeleteHeld`).
     pub held_deletes: Vec<Diagnostic>,
-    /// Fastmail-only groups being copied that list a UID pairing replaced
-    /// (Decision 7: fixed by hand in v1). A group here may also legitimately
-    /// appear under `copies` — this list only flags which of those copies
-    /// need a by-hand membership fix; membership on both sides stays stale
-    /// until CG-14 rewrites it.
-    pub groups_with_reuid_members: Vec<ReportCopy>,
+    /// Groups this cycle writes to iCloud that list a member iCloud will not
+    /// hold once the cycle completes: skipped, held, unreadable or deleted
+    /// members, or a re-UID the rewrite did not cover (CG-14 Decision 4).
+    /// Fixed by hand. Filled by `plan_cycle`, not by `build`.
+    pub groups_with_unmapped_members: Vec<ReportCopy>,
     /// CG-18 cleanup aid: synced nameless contacts that look like duplicates
     /// of another synced contact (`synced_duplicates`). Filled by
     /// `plan_cycle`, not by `build`.
@@ -163,7 +204,6 @@ impl BaselineReport {
         let (likely_duplicates, skipped): (Vec<Skip>, Vec<Skip>) = skips.iter().cloned().partition(|skip| skip.reason == SkipReason::LikelyDuplicate);
         report.likely_duplicates = likely_duplicates;
         report.skipped = skipped;
-        let mut replaced_fastmail_uids: HashSet<&Uid> = HashSet::new();
         for op in ops {
             match op {
                 Op::Adopt { uid, synced, .. } => report.in_sync.push(ReportPair::new(uid, &synced.card, None)),
@@ -175,14 +215,8 @@ impl BaselineReport {
                     ..
                 } => report.conflicts.push(ReportPair::new(uid, &synced.card, Some(*winner))),
                 Op::Recreate {
-                    uid,
-                    pass,
-                    fastmail_uid,
-                    synced,
-                    conflict,
-                    ..
+                    uid, pass, synced, conflict, ..
                 } => {
-                    replaced_fastmail_uids.insert(fastmail_uid);
                     let line = ReportPair::new(uid, &synced.card, conflict.as_ref().map(|c| c.winner));
                     match pass {
                         PairPass::Content => report.reuid.push(line),
@@ -194,17 +228,6 @@ impl BaselineReport {
                 _ => {}
             }
         }
-        report.groups_with_reuid_members = ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::Create {
-                    uid, to: Side::ICloud, synced, ..
-                } if synced.card.is_group() && synced.card.member_uids().iter().any(|m| replaced_fastmail_uids.contains(m)) => {
-                    Some(ReportCopy::new(uid, &synced.card, Side::ICloud))
-                }
-                _ => None,
-            })
-            .collect();
         report.unreadable = diagnostics
             .iter()
             .filter_map(|d| match d {
@@ -288,8 +311,8 @@ impl fmt::Display for BaselineReport {
         }
         section(
             f,
-            "Groups listing re-UID'd members (membership stale until CG-14):",
-            &self.groups_with_reuid_members,
+            "Groups with unmapped members (not on iCloud after this cycle; fix by hand):",
+            &self.groups_with_unmapped_members,
         )?;
         section(
             f,
