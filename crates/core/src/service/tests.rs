@@ -11,7 +11,7 @@ use crate::{
         NewPendingRecreate, PendingRecreateRepository, PhotoState, SideState,
     },
     sync::SyncedCard,
-    test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp, Write},
+    test_support::{InMemoryAddressBook, InMemoryPhotoFetcher, InMemoryState, Op as BookOp, Write},
 };
 
 const ICLOUD_URL: &str = "https://icloud.test/card/";
@@ -28,6 +28,8 @@ impl Clock for TestClock {
 struct Harness {
     icloud: Arc<InMemoryAddressBook>,
     fastmail: Arc<InMemoryAddressBook>,
+    #[allow(dead_code, reason = "Task 5's photo tests drive it")]
+    photos: Arc<InMemoryPhotoFetcher>,
     state: Arc<InMemoryState>,
     clock: Arc<TestClock>,
     config: SyncConfig,
@@ -56,15 +58,24 @@ impl Harness {
         let icloud = book(ICLOUD_URL, "icloud.test");
         let fastmail = book(FASTMAIL_URL, "fastmail.test");
         let state = InMemoryState::new();
+        let photos = Arc::new(InMemoryPhotoFetcher::new());
         let clock = Arc::new(TestClock(Mutex::new("2026-09-27T00:00:00Z".parse().unwrap())));
         let config = SyncConfig {
             winner,
             poll_interval: TimeDelta::seconds(60),
         };
-        let service = SyncService::new(icloud.clone(), fastmail.clone(), state.repository_service(), config, clock.clone());
+        let service = SyncService::new(
+            icloud.clone(),
+            fastmail.clone(),
+            photos.clone(),
+            state.repository_service(),
+            config,
+            clock.clone(),
+        );
         Self {
             icloud,
             fastmail,
+            photos,
             state,
             clock,
             config,

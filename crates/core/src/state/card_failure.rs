@@ -91,6 +91,8 @@ pub enum FailureReason {
     Unauthorized,
     /// The server rejected the card or request for another reason.
     Rejected,
+    /// The server refused the card as too large.
+    TooLarge,
     /// One UID at several hrefs on one side; none of them is synced.
     DuplicateUid,
     /// The card at a synced href now carries another UID.
@@ -111,6 +113,7 @@ impl FailureReason {
             Self::Transient => "transient",
             Self::Unauthorized => "unauthorized",
             Self::Rejected => "rejected",
+            Self::TooLarge => "too_large",
             Self::DuplicateUid => "duplicate_uid",
             Self::UidChanged => "uid_changed",
             Self::Internal => "internal",
@@ -131,6 +134,7 @@ impl FromStr for FailureReason {
             "transient" => Ok(Self::Transient),
             "unauthorized" => Ok(Self::Unauthorized),
             "rejected" => Ok(Self::Rejected),
+            "too_large" => Ok(Self::TooLarge),
             "duplicate_uid" => Ok(Self::DuplicateUid),
             "uid_changed" => Ok(Self::UidChanged),
             "internal" => Ok(Self::Internal),
@@ -149,6 +153,7 @@ impl From<&Error> for FailureReason {
             Error::AddressBook(AddressBookError::RateLimited { .. }) => Self::RateLimited,
             Error::AddressBook(AddressBookError::Transient(_)) => Self::Transient,
             Error::AddressBook(AddressBookError::Unauthorized) => Self::Unauthorized,
+            Error::AddressBook(AddressBookError::TooLarge { .. }) => Self::TooLarge,
             Error::AddressBook(AddressBookError::Permanent(_)) => Self::Rejected,
             _ => Self::Internal,
         }
@@ -255,6 +260,7 @@ mod tests {
             FailureReason::Transient,
             FailureReason::Unauthorized,
             FailureReason::Rejected,
+            FailureReason::TooLarge,
             FailureReason::DuplicateUid,
             FailureReason::UidChanged,
             FailureReason::Internal,
@@ -263,6 +269,14 @@ mod tests {
         }
         "oops".parse::<FailureReason>().unwrap_err();
         "merge".parse::<FailureOp>().unwrap_err();
+    }
+
+    #[test]
+    fn too_large_maps_from_the_address_book_error() {
+        let error = Error::AddressBook(AddressBookError::TooLarge { href: Href::from("/a.vcf") });
+        assert_eq!(FailureReason::from(&error), FailureReason::TooLarge);
+        assert_eq!(FailureReason::TooLarge.as_str(), "too_large");
+        assert!(!error.is_transient());
     }
 
     #[test]

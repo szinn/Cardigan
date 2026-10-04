@@ -24,6 +24,9 @@ pub(crate) async fn put(http: &HttpClient, bound: &Bound, href: &Href, body: &[u
         Precondition::IfNoneMatch => request.header("If-None-Match", "*"),
     };
     let response = http.send(request).await?;
+    if response.status.as_u16() == 403 && response.body.windows(17).any(|w| w == b"incomingVcardSize") {
+        return Err(AddressBookError::TooLarge { href: href.clone() });
+    }
     if !response.status.is_success() {
         return Err(response.error(&context, Some(href)));
     }
@@ -184,6 +187,23 @@ mod tests {
 
         match error {
             Error::AddressBook(inner) => assert_eq!(inner, AddressBookError::PreconditionFailed { href: href("a") }),
+            other => panic!("expected AddressBook error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn put_rejected_for_size_is_too_large() {
+        let server = MockServer::start().await;
+        let adapter = discovered(&server).await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Checking Card string size before vcard parsing... incomingVcardSize=300000"))
+            .mount(&server)
+            .await;
+
+        let error = adapter.put(&href("a"), CARD, Precondition::IfNoneMatch).await.unwrap_err();
+
+        match error {
+            Error::AddressBook(inner) => assert_eq!(inner, AddressBookError::TooLarge { href: href("a") }),
             other => panic!("expected AddressBook error, got {other:?}"),
         }
     }

@@ -92,7 +92,7 @@ mod tests {
         addressbook::Collection,
         contact::Side,
         service::{SyncConfig, SyncService, SystemClock},
-        test_support::{InMemoryAddressBook, InMemoryState},
+        test_support::{InMemoryAddressBook, InMemoryPhotoFetcher, InMemoryState},
     };
     use chrono::TimeDelta;
 
@@ -253,6 +253,7 @@ mod tests {
         let service = SyncService::new(
             icloud.clone(),
             fastmail.clone(),
+            Arc::new(InMemoryPhotoFetcher::new()),
             InMemoryState::new().repository_service(),
             SyncConfig {
                 winner: Side::ICloud,

@@ -11,7 +11,10 @@ use cg_core::{
 };
 use chrono::TimeDelta;
 
-use crate::{carddav::build_address_book, config::Config};
+use crate::{
+    carddav::{build_address_book, build_photo_fetcher},
+    config::Config,
+};
 
 /// The `SyncService` for both configured address books. Builds the HTTP
 /// clients only; nothing is sent until the first cycle discovers the
@@ -23,7 +26,14 @@ pub fn build_sync_service(config: &Config, repository_service: Arc<RepositorySer
         winner: config.conflict_winner,
         poll_interval: TimeDelta::from_std(config.poll_interval).context("CARDIGAN_POLL_INTERVAL_SECS is too large")?,
     };
-    Ok(SyncService::new(icloud, fastmail, repository_service, sync_config, Arc::new(SystemClock)))
+    Ok(SyncService::new(
+        icloud,
+        fastmail,
+        Arc::new(build_photo_fetcher(config)?),
+        repository_service,
+        sync_config,
+        Arc::new(SystemClock),
+    ))
 }
 
 #[cfg(test)]

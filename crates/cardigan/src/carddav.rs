@@ -1,7 +1,7 @@
 //! Builds the cg-carddav adapter for one side from the loaded configuration.
 
 use anyhow::Context;
-use cg_carddav::{CardDavAddressBook, CardDavConfig, ProviderQuirks};
+use cg_carddav::{CardDavAddressBook, CardDavConfig, IcloudPhotoFetcher, ProviderQuirks};
 use cg_core::contact::Side;
 use secrecy::SecretString;
 use url::Url;
@@ -22,6 +22,12 @@ pub fn build_address_book(side: Side, config: &Config) -> anyhow::Result<CardDav
     let password = SecretString::from(endpoint.password.expose().to_owned());
     CardDavAddressBook::new(CardDavConfig::new(entry_url, endpoint.username.clone(), password, quirks))
         .with_context(|| format!("Couldn't build the {side} CardDAV client"))
+}
+
+/// The iCloud photo downloader, with the iCloud credentials (CG-15).
+pub fn build_photo_fetcher(config: &Config) -> anyhow::Result<IcloudPhotoFetcher> {
+    let password = SecretString::from(config.icloud.password.expose().to_owned());
+    IcloudPhotoFetcher::new(config.icloud.username.clone(), password).context("Couldn't build the iCloud photo client")
 }
 
 #[cfg(test)]

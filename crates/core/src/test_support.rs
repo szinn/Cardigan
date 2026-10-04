@@ -3,14 +3,14 @@
 //! crates' tests.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     sync::{Mutex, MutexGuard},
 };
 
 use crate::{
     AddressBookError, Error,
-    addressbook::{AddressBook, ChangeSet, Changes, Collection, FetchedCard, MultigetResult, Precondition, SyncToken},
-    contact::{ETag, Href},
+    addressbook::{AddressBook, ChangeSet, Changes, Collection, FetchedCard, MultigetResult, PhotoFetcher, Precondition, SyncToken},
+    contact::{ETag, Href, PhotoUri},
 };
 
 mod state;
@@ -297,6 +297,57 @@ impl AddressBook for InMemoryAddressBook {
         }
         state.remove(href);
         Ok(())
+    }
+}
+
+/// A fake `PhotoFetcher`: serves registered bytes, records fetch counts, and
+/// can fail the next fetch of one URI.
+#[derive(Default)]
+pub struct InMemoryPhotoFetcher {
+    state: Mutex<PhotoFetcherState>,
+}
+
+#[derive(Default)]
+struct PhotoFetcherState {
+    photos: HashMap<String, Vec<u8>>,
+    failures: HashMap<String, AddressBookError>,
+    fetches: usize,
+}
+
+impl InMemoryPhotoFetcher {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn serve(&self, uri: &str, bytes: Vec<u8>) -> PhotoUri {
+        self.state.lock().expect("poisoned").photos.insert(uri.to_owned(), bytes);
+        PhotoUri::from(uri.to_owned())
+    }
+
+    pub fn fail_next(&self, uri: &str, error: AddressBookError) {
+        self.state.lock().expect("poisoned").failures.insert(uri.to_owned(), error);
+    }
+
+    #[must_use]
+    pub fn fetches(&self) -> usize {
+        self.state.lock().expect("poisoned").fetches
+    }
+}
+
+#[async_trait::async_trait]
+impl PhotoFetcher for InMemoryPhotoFetcher {
+    async fn fetch(&self, uri: &PhotoUri) -> Result<Vec<u8>, Error> {
+        let mut state = self.state.lock().expect("poisoned");
+        state.fetches += 1;
+        if let Some(error) = state.failures.remove(uri.as_str()) {
+            return Err(error.into());
+        }
+        state
+            .photos
+            .get(uri.as_str())
+            .cloned()
+            .ok_or_else(|| AddressBookError::Permanent("HTTP 404".into()).into())
     }
 }
 

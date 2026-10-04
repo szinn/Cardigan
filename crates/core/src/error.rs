@@ -144,6 +144,11 @@ pub enum AddressBookError {
     #[error("Precondition failed for {href}")]
     PreconditionFailed { href: Href },
 
+    /// iCloud refused the card for its size (HTTP 403, CG-15 S7). Permanent
+    /// until the card changes.
+    #[error("Card too large for {href}")]
+    TooLarge { href: Href },
+
     /// HTTP 429 or 503. `retry_after` is the server's `Retry-After`, when it
     /// sent one. Transient.
     #[error("Rate limited (retry after {retry_after:?})")]
@@ -172,7 +177,7 @@ impl AddressBookError {
         match self {
             Self::PreconditionFailed { .. } => ErrorKind::Conflict,
             Self::RateLimited { .. } | Self::Transient(_) => ErrorKind::ServiceUnavailable,
-            Self::Unauthorized | Self::Permanent(_) => ErrorKind::Internal,
+            Self::TooLarge { .. } | Self::Unauthorized | Self::Permanent(_) => ErrorKind::Internal,
         }
     }
 }

@@ -19,7 +19,7 @@ use self::listing::Stored;
 pub use self::summary::{CycleSummary, DirectionCounts};
 use crate::{
     AddressBookError, Error,
-    addressbook::{AddressBook, Collection},
+    addressbook::{AddressBook, Collection, PhotoFetcher},
     contact::{ConflictWinner, Side},
     repository::RepositoryService,
     state::BackoffPolicy,
@@ -123,6 +123,9 @@ impl Collections {
 pub struct SyncService {
     icloud: Arc<dyn AddressBook>,
     fastmail: Arc<dyn AddressBook>,
+    /// Downloads iCloud photos before planning (CG-15 R6).
+    #[allow(dead_code, reason = "Task 5 wires the downloads in")]
+    photos: Arc<dyn PhotoFetcher>,
     repository_service: Arc<RepositoryService>,
     winner: ConflictWinner,
     backoff: BackoffPolicy,
@@ -137,6 +140,7 @@ impl SyncService {
     pub fn new(
         icloud: Arc<dyn AddressBook>,
         fastmail: Arc<dyn AddressBook>,
+        photos: Arc<dyn PhotoFetcher>,
         repository_service: Arc<RepositoryService>,
         config: SyncConfig,
         clock: Arc<dyn Clock>,
@@ -144,6 +148,7 @@ impl SyncService {
         Self {
             icloud,
             fastmail,
+            photos,
             repository_service,
             winner: config.winner,
             backoff: config.backoff(),
