@@ -1,8 +1,8 @@
 use cg_core::{
     Error, RepositoryError,
-    contact::{CardHash, ETag, Href, Side, Uid, VCard},
+    contact::{CardHash, ETag, Href, PhotoHash, PhotoUri, Side, Uid, VCard},
     repository::Transaction,
-    state::{ContactState, ContactStateRepository, NewContactState, SideState},
+    state::{ContactState, ContactStateRepository, NewContactState, PhotoState, SideState},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{
@@ -44,7 +44,23 @@ impl TryFrom<contacts::Model> for ContactState {
             },
             content_hash: CardHash::from_hex(&model.content_hash).map_err(|_| corrupt("content_hash"))?,
             hash_version: u8::try_from(model.hash_version).map_err(|_| corrupt("hash_version"))?,
-            photo_stripped: model.photo_stripped,
+            photo: PhotoState {
+                icloud_uri: model.icloud_photo_uri.map(PhotoUri::from),
+                icloud_hash: model
+                    .icloud_photo_hash
+                    .as_deref()
+                    .map(PhotoHash::from_hex)
+                    .transpose()
+                    .map_err(|_| corrupt("icloud_photo_hash"))?,
+                fastmail_hash: model
+                    .fastmail_photo_hash
+                    .as_deref()
+                    .map(PhotoHash::from_hex)
+                    .transpose()
+                    .map_err(|_| corrupt("fastmail_photo_hash"))?,
+                stripped: model.photo_stripped,
+                tracked: model.photo_tracked,
+            },
             last_synced_vcard: VCard::parse(model.last_synced_vcard).map_err(|_| corrupt("last_synced_vcard"))?,
             last_synced_at: model.last_synced_at.with_timezone(&Utc),
             created_at: model.created_at.with_timezone(&Utc),
@@ -101,7 +117,11 @@ impl ContactStateRepository for ContactStateRepositoryAdapter {
             fastmail_last_seen_at: Set(new.fastmail.last_seen_at.into()),
             content_hash: Set(new.content_hash.as_hex()),
             hash_version: Set(i64::from(new.hash_version)),
-            photo_stripped: Set(new.photo_stripped),
+            photo_stripped: Set(new.photo.stripped),
+            icloud_photo_uri: Set(new.photo.icloud_uri.map(|uri| uri.as_str().to_owned())),
+            icloud_photo_hash: Set(new.photo.icloud_hash.map(|hash| hash.as_hex())),
+            fastmail_photo_hash: Set(new.photo.fastmail_hash.map(|hash| hash.as_hex())),
+            photo_tracked: Set(new.photo.tracked),
             last_synced_vcard: Set(new.last_synced_vcard.into_bytes()),
             last_synced_at: Set(new.last_synced_at.into()),
             created_at: Set(now),
@@ -143,7 +163,11 @@ impl ContactStateRepository for ContactStateRepositoryAdapter {
         updater.fastmail_last_seen_at = Set(fastmail_last_seen_at);
         updater.content_hash = Set(state.content_hash.as_hex());
         updater.hash_version = Set(i64::from(state.hash_version));
-        updater.photo_stripped = Set(state.photo_stripped);
+        updater.photo_stripped = Set(state.photo.stripped);
+        updater.icloud_photo_uri = Set(state.photo.icloud_uri.map(|uri| uri.as_str().to_owned()));
+        updater.icloud_photo_hash = Set(state.photo.icloud_hash.map(|hash| hash.as_hex()));
+        updater.fastmail_photo_hash = Set(state.photo.fastmail_hash.map(|hash| hash.as_hex()));
+        updater.photo_tracked = Set(state.photo.tracked);
         updater.last_synced_vcard = Set(state.last_synced_vcard.into_bytes());
         updater.last_synced_at = Set(state.last_synced_at.into());
         updater.update(transaction).await.map_err(handle_dberr)?.try_into()
@@ -191,18 +215,19 @@ impl ContactStateRepository for ContactStateRepositoryAdapter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fmt::Write as _, sync::Arc};
 
     use cg_core::{
         Error, RepositoryError,
-        contact::{CANONICAL_VERSION, ETag, HashOptions, Href, Side, Uid, VCard},
+        contact::{CANONICAL_VERSION, ETag, HashOptions, Href, PhotoHash, PhotoUri, Side, Uid, VCard},
         repository::RepositoryService,
-        state::{NewContactState, SideState},
+        state::{NewContactState, PhotoState, SideState},
     };
     use chrono::{DateTime, TimeZone, Utc};
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
+    use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, Database};
+    use sea_orm_migration::MigratorTrait;
 
-    use crate::{create_repository_service, entities::contacts, transaction::TransactionImpl};
+    use crate::{create_repository_service, entities::contacts, migrations::Migrator, transaction::TransactionImpl};
 
     async fn setup() -> Arc<RepositoryService> {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -235,7 +260,7 @@ mod tests {
             fastmail: side("fastmail", uid, 0),
             content_hash: vcard.canonical_hash(HashOptions::default()),
             hash_version: CANONICAL_VERSION,
-            photo_stripped: false,
+            photo: PhotoState::default(),
             last_synced_vcard: vcard,
             last_synced_at: at(0),
         }
@@ -309,6 +334,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn photo_state_round_trips() {
+        let svc = setup().await;
+        let repo = svc.contact_state_repository();
+        let tx = svc.repository().begin().await.unwrap();
+        let mut state = repo.add(&*tx, new_state("u1")).await.unwrap();
+        assert_eq!(state.photo, PhotoState::default(), "a new row starts untracked");
+
+        state.photo = PhotoState {
+            icloud_uri: Some(PhotoUri::from("https://gateway.icloud.com/a".to_owned())),
+            icloud_hash: Some(PhotoHash::of(b"i")),
+            fastmail_hash: Some(PhotoHash::of(b"f")),
+            stripped: true,
+            tracked: true,
+        };
+        let updated = repo.update(&*tx, state.clone()).await.unwrap();
+
+        assert_eq!(updated.photo, state.photo);
+        assert_eq!(repo.find_by_uid(&*tx, &Uid::from("u1")).await.unwrap().unwrap().photo, state.photo);
+    }
+
+    /// A database created by migrations 000001-000006 (the live one) upgrades
+    /// in place: its rows start untracked and keep `photo_stripped`.
+    #[tokio::test]
+    async fn rows_from_before_the_photo_columns_start_untracked() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, Some(6)).await.unwrap();
+        let vcard_hex = card_bytes("u1").iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        });
+        let stamp = "2026-10-01 00:00:00+00:00";
+        db.execute_unprepared(&format!(
+            "INSERT INTO contacts (version, uid, icloud_href, icloud_etag, icloud_last_seen_at, fastmail_href, fastmail_etag, fastmail_last_seen_at, \
+             content_hash, hash_version, photo_stripped, last_synced_vcard, last_synced_at, created_at, updated_at) VALUES (1, 'u1', '/icloud/u1.vcf', \
+             '\"e\"', '{stamp}', '/fastmail/u1.vcf', '\"e\"', '{stamp}', '{hash}', {version}, 1, X'{vcard_hex}', '{stamp}', '{stamp}', '{stamp}')",
+            hash = "0".repeat(64),
+            version = CANONICAL_VERSION,
+        ))
+        .await
+        .unwrap();
+
+        let svc = create_repository_service(db).await.unwrap();
+        let tx = svc.repository().begin().await.unwrap();
+        let state = svc.contact_state_repository().find_by_uid(&*tx, &Uid::from("u1")).await.unwrap().unwrap();
+
+        assert_eq!(
+            state.photo,
+            PhotoState {
+                icloud_uri: None,
+                icloud_hash: None,
+                fastmail_hash: None,
+                stripped: true,
+                tracked: false,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn update_persists_fields_and_bumps_version() {
         let svc = setup().await;
         let repo = svc.contact_state_repository();
@@ -316,13 +399,13 @@ mod tests {
         let mut state = repo.add(&*tx, new_state("u1")).await.unwrap();
 
         state.fastmail.etag = ETag::from("\"fastmail-new\"");
-        state.photo_stripped = true;
+        state.photo.stripped = true;
         state.last_synced_at = at(60);
         let updated = repo.update(&*tx, state.clone()).await.unwrap();
 
         assert_eq!(updated.version, state.version + 1);
         assert_eq!(updated.fastmail.etag.as_str(), "\"fastmail-new\"");
-        assert!(updated.photo_stripped);
+        assert!(updated.photo.stripped);
         assert_eq!(updated.last_synced_at, at(60));
         assert_eq!(repo.find_by_uid(&*tx, &Uid::from("u1")).await.unwrap(), Some(updated));
     }
@@ -351,7 +434,7 @@ mod tests {
         // Stale snapshot from before `mark_seen`: version still matches, but
         // `fastmail.last_seen_at` is the old, now-stale value.
         let mut stale_snapshot = added.clone();
-        stale_snapshot.photo_stripped = true;
+        stale_snapshot.photo.stripped = true;
         let updated = repo.update(&*tx, stale_snapshot).await.unwrap();
 
         assert_eq!(updated.fastmail.last_seen_at, at(100), "mark_seen's later last_seen_at must not be rolled back");
@@ -370,7 +453,7 @@ mod tests {
         let mut state = repo.add(&*tx, new_state("u1")).await.unwrap();
         repo.delete_by_uid(&*tx, &Uid::from("u1")).await.unwrap();
 
-        state.photo_stripped = true;
+        state.photo.stripped = true;
         let err = repo.update(&*tx, state).await.unwrap_err();
         assert!(matches!(err, Error::RepositoryError(RepositoryError::NotFound)), "{err:?}");
     }
@@ -459,6 +542,10 @@ mod tests {
             content_hash: Set("ab".repeat(32)),
             hash_version: Set(1),
             photo_stripped: Set(false),
+            icloud_photo_uri: Set(None),
+            icloud_photo_hash: Set(None),
+            fastmail_photo_hash: Set(None),
+            photo_tracked: Set(false),
             last_synced_vcard: Set(card_bytes(uid)),
             last_synced_at: Set(at(0).into()),
             created_at: Set(at(0).into()),

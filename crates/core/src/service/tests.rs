@@ -8,7 +8,7 @@ use crate::{
     repository::transaction,
     state::{
         CardFailureRepository, ConflictOrigin, ContactStateRepository, EndpointRepository, FailedCard, FailureOp, FailureReason, NewContactState,
-        NewPendingRecreate, PendingRecreateRepository, SideState,
+        NewPendingRecreate, PendingRecreateRepository, PhotoState, SideState,
     },
     sync::SyncedCard,
     test_support::{InMemoryAddressBook, InMemoryState, Op as BookOp, Write},
@@ -129,7 +129,7 @@ impl Harness {
             },
             content_hash: synced.content_hash,
             hash_version: CANONICAL_VERSION,
-            photo_stripped: false,
+            photo: PhotoState::default(),
             last_synced_vcard: synced.card,
             last_synced_at: now,
         };

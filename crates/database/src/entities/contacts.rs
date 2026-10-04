@@ -29,6 +29,10 @@ pub struct Model {
     pub content_hash: String,
     pub hash_version: i64,
     pub photo_stripped: bool,
+    pub icloud_photo_uri: Option<String>,
+    pub icloud_photo_hash: Option<String>,
+    pub fastmail_photo_hash: Option<String>,
+    pub photo_tracked: bool,
     #[sea_orm(column_type = "Blob")]
     pub last_synced_vcard: Vec<u8>,
     pub last_synced_at: DateTimeWithTimeZone,

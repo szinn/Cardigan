@@ -13,6 +13,6 @@ mod pending_recreate;
 pub use baseline_skip::{BaselineSkip, BaselineSkipId, BaselineSkipRepository, NewBaselineSkip};
 pub use card_failure::{BackoffPolicy, CardFailure, CardFailureId, CardFailureRepository, FailedCard, FailureOp, FailureReason};
 pub use conflict::{Conflict, ConflictId, ConflictOrigin, ConflictRepository, NewConflict};
-pub use contact_state::{ContactState, ContactStateId, ContactStateRepository, NewContactState, SideState};
+pub use contact_state::{ContactState, ContactStateId, ContactStateRepository, NewContactState, PhotoState, SideState};
 pub use endpoint::{Endpoint, EndpointRepository};
 pub use pending_recreate::{NewPendingRecreate, PendingRecreate, PendingRecreateId, PendingRecreateRepository};

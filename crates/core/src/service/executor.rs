@@ -9,7 +9,7 @@ use crate::{
     AddressBookError, Error,
     addressbook::Precondition,
     contact::{CANONICAL_VERSION, ETag, Href, Side, Uid, VCard},
-    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, NewPendingRecreate, SideState},
+    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, NewPendingRecreate, PhotoState, SideState},
     sync::{Op, Resource, SyncedCard},
     with_transaction,
 };
@@ -25,6 +25,8 @@ pub(super) struct StateWrite {
     pub(super) clear: Vec<(Side, Href)>,
     /// Completes a Recreate: removes its journal row in the same transaction.
     pub(super) recreated: bool,
+    /// `None` leaves the row's photo state as it is.
+    pub(super) photo: Option<PhotoState>,
 }
 
 impl StateWrite {
@@ -43,6 +45,7 @@ impl StateWrite {
             synced: Some(synced.clone()),
             clear,
             recreated: false,
+            photo: None,
         }
     }
 }
@@ -179,6 +182,7 @@ impl SyncService {
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, old_fastmail.href.clone())],
                     recreated: true,
+                    photo: None,
                 };
                 self.write_state(write, now).await
             }
@@ -190,6 +194,7 @@ impl SyncService {
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, fastmail.href.clone())],
                     recreated: false,
+                    photo: None,
                 };
                 self.write_state(write, now).await
             }
@@ -201,6 +206,7 @@ impl SyncService {
                     synced: synced.clone(),
                     clear: Vec::new(),
                     recreated: false,
+                    photo: None,
                 };
                 self.write_state(write, now).await
             }
@@ -249,6 +255,7 @@ impl SyncService {
                 synced,
                 clear,
                 recreated,
+                photo,
             } = write;
             let seen = |resource: Resource| SideState {
                 href: resource.href,
@@ -269,9 +276,11 @@ impl SyncService {
                     if let Some(synced) = synced {
                         row.content_hash = synced.content_hash;
                         row.hash_version = CANONICAL_VERSION;
-                        row.photo_stripped = false;
                         row.last_synced_vcard = synced.card;
                         row.last_synced_at = now;
+                    }
+                    if let Some(photo) = photo {
+                        row.photo = photo;
                     }
                     contact_state_repository.update(tx, row).await?;
                 }
@@ -285,7 +294,7 @@ impl SyncService {
                         fastmail: seen(fastmail),
                         content_hash: synced.content_hash,
                         hash_version: CANONICAL_VERSION,
-                        photo_stripped: false,
+                        photo: photo.unwrap_or_default(),
                         last_synced_vcard: synced.card,
                         last_synced_at: now,
                     };

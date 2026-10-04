@@ -1,8 +1,10 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 
 use crate::{
     Error,
-    contact::{CardHash, ETag, Href, Side, Uid, VCard},
+    contact::{CardHash, ETag, Href, PhotoHash, PhotoUri, Side, Uid, VCard},
     repository::Transaction,
 };
 
@@ -15,6 +17,30 @@ pub struct SideState {
     pub etag: ETag,
     /// When this side last reported the card (poll bookkeeping).
     pub last_seen_at: DateTime<Utc>,
+}
+
+/// What the daemon last recorded about a pair's photos (CG-15 R2).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PhotoState {
+    pub icloud_uri: Option<PhotoUri>,
+    pub icloud_hash: Option<PhotoHash>,
+    pub fastmail_hash: Option<PhotoHash>,
+    /// Fastmail's photo could not be fitted onto iCloud (Decision 1).
+    pub stripped: bool,
+    /// `false` until this row's photos were first recorded (Decision 2).
+    pub tracked: bool,
+}
+
+impl fmt::Debug for PhotoState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PhotoState")
+            .field("has_icloud_uri", &self.icloud_uri.is_some())
+            .field("icloud_hash", &self.icloud_hash)
+            .field("fastmail_hash", &self.fastmail_hash)
+            .field("stripped", &self.stripped)
+            .field("tracked", &self.tracked)
+            .finish()
+    }
 }
 
 /// What the daemon last synced for one contact. A row exists only once the
@@ -33,9 +59,9 @@ pub struct ContactState {
     /// `CANONICAL_VERSION` that produced `content_hash`. A mismatch means the
     /// hash is stale, not that the card changed: re-baseline, don't sync.
     pub hash_version: u8,
-    /// The card's oversize photo was stripped on sync; compare with
-    /// `HashOptions { exclude_photo: true, .. }`.
-    pub photo_stripped: bool,
+    /// The pair's photo identities (CG-15). Content hashing never includes
+    /// photos.
+    pub photo: PhotoState,
     /// The card both sides held after the last successful sync, verbatim.
     /// Full contact data (PII): never log it.
     pub last_synced_vcard: VCard,
@@ -61,7 +87,7 @@ pub struct NewContactState {
     pub fastmail: SideState,
     pub content_hash: CardHash,
     pub hash_version: u8,
-    pub photo_stripped: bool,
+    pub photo: PhotoState,
     pub last_synced_vcard: VCard,
     pub last_synced_at: DateTime<Utc>,
 }
@@ -103,6 +129,15 @@ mod tests {
     use crate::contact::HashOptions;
 
     #[test]
+    fn photo_state_debug_hides_the_uri() {
+        let state = PhotoState {
+            icloud_uri: Some(PhotoUri::from("https://gateway.icloud.com/secret".to_owned())),
+            ..PhotoState::default()
+        };
+        assert!(!format!("{state:?}").contains("secret"));
+    }
+
+    #[test]
     fn side_selects_the_matching_side_state() {
         let vcard = VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nEND:VCARD\r\n").expect("card parses");
         let seen = DateTime::<Utc>::UNIX_EPOCH;
@@ -119,7 +154,7 @@ mod tests {
             fastmail: side("/fastmail/u1.vcf"),
             content_hash: vcard.canonical_hash(HashOptions::default()),
             hash_version: 1,
-            photo_stripped: false,
+            photo: PhotoState::default(),
             last_synced_vcard: vcard,
             last_synced_at: seen,
             created_at: seen,
