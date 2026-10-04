@@ -59,16 +59,26 @@ pub(super) type Written = Vec<(Side, Href, Option<ETag>)>;
 
 impl SyncService {
     /// Runs `op`. Every card it writes is pushed to `written` as soon as the
-    /// server accepts it, so a later failure can hold it (Decision 5).
-    pub(super) async fn execute(&self, op: &Op, collections: &Collections, now: DateTime<Utc>, written: &mut Written) -> Result<(), Error> {
+    /// server accepts it, so a later failure can hold it (Decision 5). A
+    /// cycle-fatal error met once the op's cards have landed (a photo
+    /// read-back, CG-19) goes to `deferred` instead: the op still writes its
+    /// state, and the caller then ends the cycle with it.
+    pub(super) async fn execute(
+        &self,
+        op: &Op,
+        collections: &Collections,
+        now: DateTime<Utc>,
+        written: &mut Written,
+        deferred: &mut Option<Error>,
+    ) -> Result<(), Error> {
         match op {
             Op::Create { uid, to, source, synced } | Op::Resurrect { uid, to, source, synced } => {
                 let href = mint_href(&collections.get(*to).addressbook_url, uid);
                 let main = self
-                    .write_photo_card(*to, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written)
+                    .write_photo_card(*to, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written, deferred)
                     .await?;
                 let clear = vec![(to.other(), source.href.clone())];
-                self.write_pushed(uid, (*to, main), source, synced, clear, written, now).await
+                self.write_pushed(uid, (*to, main), source, synced, clear, written, deferred, now).await
             }
             Op::Update {
                 uid,
@@ -79,10 +89,10 @@ impl SyncService {
             } => {
                 let precondition = Precondition::IfMatch(target.etag.clone());
                 let main = self
-                    .write_photo_card(*to, target.href.clone(), synced.body(), synced.photo, precondition, written)
+                    .write_photo_card(*to, target.href.clone(), synced.body(), synced.photo, precondition, written, deferred)
                     .await?;
                 let clear = vec![(to.other(), source.href.clone())];
-                self.write_pushed(uid, (*to, main), source, synced, clear, written, now).await
+                self.write_pushed(uid, (*to, main), source, synced, clear, written, deferred, now).await
             }
             Op::Delete { uid, on, target } => {
                 self.book(*on).delete(&target.href, Some(&target.etag)).await?;
@@ -110,10 +120,10 @@ impl SyncService {
                 let loser = winner.other();
                 let precondition = Precondition::IfMatch(target.etag.clone());
                 let main = self
-                    .write_photo_card(loser, target.href.clone(), synced.body(), synced.photo, precondition, written)
+                    .write_photo_card(loser, target.href.clone(), synced.body(), synced.photo, precondition, written, deferred)
                     .await?;
                 let clear = vec![(*winner, source.href.clone()), (loser, target.href.clone())];
-                self.write_pushed(uid, (loser, main), source, synced, clear, written, now).await
+                self.write_pushed(uid, (loser, main), source, synced, clear, written, deferred, now).await
             }
             // Fastmail first (CG-14 triage F3): a failed iCloud create then
             // leaves an already-relinked group for the next cycle to copy.
@@ -128,7 +138,7 @@ impl SyncService {
                 let fastmail_now = self.write_card(Side::Fastmail, source.href.clone(), rewritten, precondition, written).await?;
                 let href = mint_href(&collections.icloud.addressbook_url, uid);
                 let (icloud_now, landed) = self
-                    .write_photo_card(Side::ICloud, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written)
+                    .write_photo_card(Side::ICloud, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written, deferred)
                     .await?;
                 let clear = vec![(Side::Fastmail, source.href.clone())];
                 let photo = Some(landed_photos(uid, synced, landed));
@@ -232,6 +242,7 @@ impl SyncService {
         synced: &SyncedCard,
         clear: Vec<(Side, Href)>,
         written: &mut Written,
+        deferred: &mut Option<Error>,
         now: DateTime<Utc>,
     ) -> Result<(), Error> {
         let (to, (resource, mut landed)) = main;
@@ -239,7 +250,15 @@ impl SyncService {
         if let Some(counter) = &synced.counter {
             let precondition = Precondition::IfMatch(counter.target.etag.clone());
             let (counter_now, counter_landed) = self
-                .write_photo_card(counter.side, counter.target.href.clone(), &counter.body, counter.change, precondition, written)
+                .write_photo_card(
+                    counter.side,
+                    counter.target.href.clone(),
+                    &counter.body,
+                    counter.change,
+                    precondition,
+                    written,
+                    deferred,
+                )
                 .await?;
             source = counter_now;
             landed = landed.or(counter_landed);
@@ -259,6 +278,10 @@ impl SyncService {
     /// downloads the new URI and matches the hash. Failing the op instead
     /// would record nothing, and the next cycle would see both photos
     /// changed and could push a resized copy over Fastmail's original.
+    ///
+    /// A cycle-fatal read-back error (unauthorized, rate limited, transient)
+    /// still lands as `Inline`, and is kept in `deferred` so the cycle ends
+    /// once the op's state is written (CG-19).
     async fn write_photo_card(
         &self,
         side: Side,
@@ -267,6 +290,7 @@ impl SyncService {
         change: PhotoChange,
         precondition: Precondition,
         written: &mut Written,
+        deferred: &mut Option<Error>,
     ) -> Result<(Resource, Option<Landed>), Error> {
         let resource = self.write_card(side, href.clone(), body, precondition, written).await?;
         if side != Side::ICloud || change != PhotoChange::Set {
@@ -276,6 +300,9 @@ impl SyncService {
             Ok(result) => result.found.into_iter().next(),
             Err(error) => {
                 tracing::warn!(side = %side, error = %error, "photo read-back failed; recording the pushed photo without its URI");
+                if is_cycle_fatal(&error) && deferred.is_none() {
+                    *deferred = Some(error);
+                }
                 return Ok((resource, Some(Landed::Inline)));
             }
         };

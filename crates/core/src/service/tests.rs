@@ -2025,3 +2025,46 @@ async fn a_failed_read_back_never_sends_the_resized_photo_to_fastmail() {
     assert_eq!(h.state.failures(), [], "nothing left failing");
     assert!(matches!(h.sync().await, CycleOutcome::Idle));
 }
+
+#[tokio::test]
+async fn a_fatal_read_back_records_the_photo_then_aborts_the_cycle() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    let big = noisy_jpeg(2000);
+    // As in the test above: a Resurrect pushes a resized photo to iCloud, and
+    // the only iCloud multiget this cycle is the read-back. This time the
+    // read-back is rate limited, which ends the cycle.
+    h.icloud.external_delete(&href("/card/u1.vcf"));
+    h.fastmail
+        .external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &format!("NOTE:edited\r\n{}", inline(&big))));
+    h.icloud.fail_next(
+        BookOp::Multiget,
+        AddressBookError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+        },
+    );
+    let fastmail_puts = puts_to(&h, Side::Fastmail);
+
+    let error = h.run(CycleMode::Sync, false).await.unwrap_err();
+
+    assert!(matches!(error, Error::AddressBook(AddressBookError::RateLimited { .. })), "{error:?}");
+    assert_eq!(puts_to(&h, Side::ICloud), 1, "the resized photo reached iCloud");
+    let photo = photo_of(&h, "u1");
+    assert_eq!(photo.icloud_uri, None, "the URI is unknown");
+    assert!(
+        photo.icloud_hash.is_some() && photo.tracked,
+        "the state was written before the abort: {photo:?}"
+    );
+    assert_eq!(h.state.failures(), [], "a card that landed is not held");
+    for _ in 0..3 {
+        h.advance(TimeDelta::seconds(61));
+        h.sync().await;
+    }
+    assert_eq!(puts_to(&h, Side::Fastmail), fastmail_puts, "no write to Fastmail");
+    assert_eq!(
+        h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await,
+        Some(big),
+        "Fastmail keeps its original"
+    );
+    assert!(matches!(h.sync().await, CycleOutcome::Idle));
+}

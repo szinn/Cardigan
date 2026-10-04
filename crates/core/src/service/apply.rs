@@ -103,9 +103,25 @@ impl SyncService {
         self.record_diagnostics(&cycle.plan.diagnostics, listed, &mut run, now).await?;
         for op in &cycle.plan.ops {
             let mut written = Written::new();
-            let Err(error) = self.execute(op, collections, now, &mut written).await else {
-                run.applied(op);
-                continue;
+            let mut deferred = None;
+            let result = self.execute(op, collections, now, &mut written, &mut deferred).await;
+            let error = match (result, deferred) {
+                (Ok(()), None) => {
+                    run.applied(op);
+                    continue;
+                }
+                // The op landed and its state is written; only then does the
+                // cycle end (CG-19). Nothing to hold: the cards are synced.
+                (Ok(()), Some(error)) => {
+                    run.applied(op);
+                    tracing::warn!(
+                        uid = %op.uid(),
+                        reason = FailureReason::from(&error).as_str(),
+                        "sync cycle aborted; retrying next interval"
+                    );
+                    return Err(error);
+                }
+                (Err(error), _) => error,
             };
             let fatal = is_cycle_fatal(&error);
             if !fatal {
