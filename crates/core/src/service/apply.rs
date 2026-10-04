@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use super::{
-    Collections, PERSISTENT_ATTEMPTS, SyncService,
+    Collections, PERSISTENT_ATTEMPTS, POISONED, SyncService,
     executor::{Written, failed_cards, holds_on_abort, is_cycle_fatal},
     listing::{Built, Listed, Stored},
     summary::{CycleSummary, direction, target_side},
@@ -101,6 +101,7 @@ impl SyncService {
     ) -> Result<CycleSummary, Error> {
         let mut run = Run::new(stored, built);
         self.record_diagnostics(&cycle.plan.diagnostics, listed, &mut run, now).await?;
+        *self.held.lock().expect(POISONED) = held_uids(&cycle.plan.diagnostics);
         for op in &cycle.plan.ops {
             let mut written = Written::new();
             let mut deferred = None;
@@ -321,6 +322,19 @@ impl SyncService {
             Ok(())
         })
     }
+}
+
+/// The UIDs whose deletes this cycle held: rows that stay as they are, and
+/// may stay photo-untracked, until a change shows in the deltas or, for
+/// `DeletionDeferred`, the failing card behind the doubt comes due (CG-19).
+fn held_uids(diagnostics: &[Diagnostic]) -> HashSet<Uid> {
+    diagnostics
+        .iter()
+        .filter_map(|diagnostic| match diagnostic {
+            Diagnostic::DeleteHeld { uid, .. } | Diagnostic::DeletionDeferred { uid, .. } => Some(uid.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The cycle's log lines beyond the per-op ones (Decision 12).

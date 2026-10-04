@@ -12,7 +12,10 @@ mod summary;
 #[cfg(test)]
 mod tests;
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use chrono::{DateTime, TimeDelta, Utc};
 
@@ -21,7 +24,7 @@ pub use self::summary::{CycleSummary, DirectionCounts};
 use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, Collection, PhotoFetcher},
-    contact::{ConflictWinner, Side},
+    contact::{ConflictWinner, Side, Uid},
     repository::RepositoryService,
     state::BackoffPolicy,
     sync::{CyclePlan, MassDeletion, PlanInput, check_deletions, plan_cycle},
@@ -34,7 +37,7 @@ pub const BACKOFF_CAP: TimeDelta = TimeDelta::hours(24);
 /// summary.
 pub const PERSISTENT_ATTEMPTS: u32 = 3;
 
-const POISONED: &str = "SyncService collections lock poisoned";
+pub(super) const POISONED: &str = "SyncService lock poisoned";
 
 /// The time source; tests substitute a settable clock.
 pub trait Clock: Send + Sync {
@@ -133,6 +136,14 @@ pub struct SyncService {
     /// Both collections once discovered (and recorded) by a sync cycle.
     /// Cleared to force re-discovery.
     collections: Mutex<Option<Collections>>,
+    /// UIDs whose deletes the last applied cycle held (`DeleteHeld`,
+    /// `DeletionDeferred`). In memory only, like CG-17's holds: `idle` lets
+    /// such a row stay untracked. The hold ends when a change shows in the
+    /// deltas or, for `DeletionDeferred`, when the failing card that made its
+    /// side uncertain comes due, which `idle`'s failure check catches (CG-19).
+    /// Empty after a restart, so the first cycle runs in full and refills
+    /// it.
+    held: Mutex<HashSet<Uid>>,
 }
 
 impl SyncService {
@@ -154,6 +165,7 @@ impl SyncService {
             backoff: config.backoff(),
             clock,
             collections: Mutex::new(None),
+            held: Mutex::new(HashSet::new()),
         }
     }
 

@@ -4,7 +4,7 @@
 use super::{href::mint_href, *};
 use crate::{
     addressbook::{Changes, Precondition},
-    contact::{CANONICAL_VERSION, CardPhoto, Href, ICLOUD_MAX_CARD_BYTES, PhotoData, PhotoHash, Uid, VCard},
+    contact::{CANONICAL_VERSION, CardPhoto, Href, ICLOUD_MAX_CARD_BYTES, PhotoData, PhotoHash, VCard},
     repository::transaction,
     state::{
         CardFailureRepository, ConflictOrigin, ContactStateRepository, EndpointRepository, FailedCard, FailureOp, FailureReason, NewContactState,
@@ -438,6 +438,59 @@ async fn deleting_the_remaining_copies_releases_a_held_delete() {
     assert_eq!((summary.forgotten, summary.held_deletes), (2, 0));
     assert_eq!(h.state.contacts().len(), 0);
     assert_eq!(h.writes(), 0);
+}
+
+#[tokio::test]
+async fn a_held_delete_of_an_untracked_row_lets_the_cycle_go_idle() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("a", "Harbor Grill").await;
+    h.seed_synced("b", "Harbor Grill").await;
+    h.state.untrack_photos();
+    h.icloud.external_delete(&href("/card/a.vcf"));
+    h.fastmail.external_delete(&href("/dav/b.vcf"));
+    assert_eq!(h.applied().await.held_deletes, 2);
+    assert!(h.state.contacts().iter().all(|row| !row.photo.tracked), "held rows stay untracked");
+
+    assert!(matches!(h.sync().await, CycleOutcome::Idle), "nothing changed since the hold");
+
+    // A change still ends the idle: deleting the remaining copies releases it.
+    h.fastmail.external_delete(&href("/dav/a.vcf"));
+    h.icloud.external_delete(&href("/card/b.vcf"));
+    assert_eq!(h.applied().await.forgotten, 2);
+}
+
+#[tokio::test]
+async fn an_untracked_row_waiting_on_its_backoff_lets_the_cycle_go_idle() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.state.untrack_photos();
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", "NOTE:edited\r\n"));
+    h.icloud.fail_next(BookOp::Put, AddressBookError::Permanent("400 Bad Request".into()));
+    assert_eq!(h.applied().await.to_icloud.errors, 1);
+    assert!(!photo_of(&h, "u1").tracked);
+
+    assert!(matches!(h.sync().await, CycleOutcome::Idle), "the failure is not due yet");
+
+    h.advance(TimeDelta::seconds(61));
+    assert_eq!(h.applied().await.to_icloud.updated, 1, "a due failure runs the cycle");
+    assert!(photo_of(&h, "u1").tracked);
+}
+
+#[tokio::test]
+async fn an_untracked_row_whose_card_is_unreadable_lets_the_cycle_go_idle() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.state.untrack_photos();
+    h.icloud
+        .external_put("/card/u1.vcf", "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Uid\r\nEND:VCARD\r\n");
+    h.applied().await;
+    assert_eq!(h.state.failures().len(), 1, "the unreadable card is recorded");
+    assert!(!photo_of(&h, "u1").tracked);
+
+    assert!(matches!(h.sync().await, CycleOutcome::Idle), "the failure is not due yet");
+
+    h.advance(TimeDelta::seconds(61));
+    assert!(!matches!(h.sync().await, CycleOutcome::Idle), "a due failure runs the cycle");
 }
 
 #[tokio::test]

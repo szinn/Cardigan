@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
-use super::{Collections, SyncService};
+use super::{Collections, POISONED, SyncService};
 use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, Changes, Collection, FetchedCard, SyncToken},
@@ -192,8 +192,23 @@ impl SyncService {
         // An untracked row (pre-upgrade, or a new pair recorded by an Adopt,
         // Conflict or Recreate that wrote nothing) still owes its first photo
         // cycle (CG-15 R4, Decision 1). Empty deltas say nothing about it, so
-        // the cycle must run until every row is tracked.
-        if stored.contacts.iter().any(|row| !row.photo.tracked) {
+        // the cycle must run until every row is tracked — unless the row is
+        // waiting anyway: its delete was held in the last applied cycle, or its
+        // own card failure (by UID, or by the card's href) is not yet
+        // due (CG-19). A change to either still shows in the deltas,
+        // and a due failure is caught below.
+        let owes_photo_cycle = {
+            let held = self.held.lock().expect(POISONED);
+            let waiting = |row: &ContactState| {
+                held.contains(&row.uid)
+                    || stored
+                        .failures
+                        .iter()
+                        .any(|failure| now < failure.next_retry_at && (failure.uid.as_ref() == Some(&row.uid) || row.side(failure.side).href == failure.href))
+            };
+            stored.contacts.iter().any(|row| !row.photo.tracked && !waiting(row))
+        };
+        if owes_photo_cycle {
             return Ok(false);
         }
         if !stored.pending.is_empty() {
