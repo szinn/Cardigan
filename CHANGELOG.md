@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4](https://github.com/szinn/Cardigan/compare/v0.1.3..v0.1.4) - 2026-10-04
+
+### Bug Fixes
+
+- _(cg-core)_ Let idle skip untracked rows that are held or backing off - ([b035afa](https://github.com/szinn/Cardigan/commit/b035afa05530ab1ee77bdc14a22a1d4aa10ed6b1))
+- _(cg-core)_ Abort the cycle on a fatal photo read-back - ([45274d7](https://github.com/szinn/Cardigan/commit/45274d77fe1f09d0bbc49341c267fc852c4d5fd7))
+- _(cg-core)_ Enforce the photo decode byte cap - ([ed1c2d5](https://github.com/szinn/Cardigan/commit/ed1c2d56e18aa2e0b515f3c91c9217d198658b45))
+
 ## [0.1.3](https://github.com/szinn/Cardigan/compare/v0.1.1..v0.1.3) - 2026-10-04
 
 ### Features
