@@ -21,7 +21,7 @@ anyhow = "1.0.104"
 thiserror = "2.0.21"
 
 # Database
-sea-orm = { version = "2.0.3", features = [
+sea-orm = { version = "2.0.4", features = [
     "debug-print",
     "runtime-tokio-rustls",
     "sqlx-sqlite",
@@ -30,7 +30,7 @@ sea-orm = { version = "2.0.3", features = [
     "with-rust_decimal",
     "with-uuid",
 ] }
-sea-orm-migration = { version = "2.0.3", features = [
+sea-orm-migration = { version = "2.0.4", features = [
     "sqlx-sqlite",
     "runtime-tokio-rustls",
     "with-chrono",
