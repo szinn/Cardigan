@@ -1,4 +1,4 @@
-use super::{BaselineReport, KnownCards, Plan, PlanInput, Planned, Skip, guard, pairing, planner, relink};
+use super::{BaselineReport, KnownCards, Plan, PlanInput, Planned, Skip, guard, pairing, photo, planner, relink};
 
 /// One cycle's complete plan: the planner's ops for synced contacts, then
 /// pairing's for unsynced cards.
@@ -11,7 +11,8 @@ pub struct CyclePlan {
 }
 
 /// Runs the planner, holds cross-pair deletes (`hold_cross_deletes`), and then
-/// runs pairing and relinks the groups it copies (CG-14). CG-8 calls this every
+/// runs pairing, relinks the groups it copies (CG-14), and gives pairing's
+/// copies the source's photo (CG-15). CG-8 calls this every
 /// cycle (an empty state store makes it the initial baseline) and checks
 /// `check_deletions` on the result before writing.
 pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
@@ -22,6 +23,7 @@ pub fn plan_cycle(input: &PlanInput<'_>) -> CyclePlan {
     plan.ops.extend(paired.ops);
     let aliases = relink::aliases(&plan.ops, input.replayed);
     relink::relink_groups(&mut plan.ops, &aliases, input.fastmail);
+    photo::attach_to_copies(&mut plan.ops, input.icloud, input.fastmail, input.photos);
     let mut report = BaselineReport::build(&plan.ops, &paired.skips, &plan.diagnostics);
     report.synced_duplicates = super::synced_duplicates(input.state);
     report.groups_with_unmapped_members = super::report::groups_with_unmapped_members(&plan.ops, input.icloud, input.state);
