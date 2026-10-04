@@ -12,6 +12,7 @@ use cg_core::{
     repository::{RepositoryService, read_only_transaction, transaction},
     service::{CycleMode, CycleOutcome, CycleRequest, SyncConfig, SyncService},
     state::{CardFailure, Conflict, ContactState, PendingRecreate},
+    test_support::InMemoryPhotoFetcher,
 };
 use cg_database::{create_repository_service, open_database};
 use chrono::TimeDelta;
@@ -112,6 +113,7 @@ async fn engine(radicale: &Radicale, db_url: &str, clock: &Arc<SettableClock>, b
     let service = Arc::new(SyncService::new(
         icloud.clone(),
         fastmail.clone(),
+        Arc::new(InMemoryPhotoFetcher::new()),
         repository_service.clone(),
         config,
         clock.clone(),

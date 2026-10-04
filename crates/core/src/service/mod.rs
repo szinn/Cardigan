@@ -6,6 +6,7 @@ mod apply;
 mod executor;
 mod href;
 mod listing;
+mod photos;
 mod replay;
 mod summary;
 #[cfg(test)]
@@ -19,7 +20,7 @@ use self::listing::Stored;
 pub use self::summary::{CycleSummary, DirectionCounts};
 use crate::{
     AddressBookError, Error,
-    addressbook::{AddressBook, Collection},
+    addressbook::{AddressBook, Collection, PhotoFetcher},
     contact::{ConflictWinner, Side},
     repository::RepositoryService,
     state::BackoffPolicy,
@@ -123,6 +124,8 @@ impl Collections {
 pub struct SyncService {
     icloud: Arc<dyn AddressBook>,
     fastmail: Arc<dyn AddressBook>,
+    /// Downloads iCloud photos before planning (CG-15 R6).
+    photos: Arc<dyn PhotoFetcher>,
     repository_service: Arc<RepositoryService>,
     winner: ConflictWinner,
     backoff: BackoffPolicy,
@@ -137,6 +140,7 @@ impl SyncService {
     pub fn new(
         icloud: Arc<dyn AddressBook>,
         fastmail: Arc<dyn AddressBook>,
+        photos: Arc<dyn PhotoFetcher>,
         repository_service: Arc<RepositoryService>,
         config: SyncConfig,
         clock: Arc<dyn Clock>,
@@ -144,6 +148,7 @@ impl SyncService {
         Self {
             icloud,
             fastmail,
+            photos,
             repository_service,
             winner: config.winner,
             backoff: config.backoff(),
@@ -178,12 +183,14 @@ impl SyncService {
         }
         let listed = self.list(&collections).await?;
         let built = self.build(&listed, &stored, now).await?;
+        let photos = self.download_photos(&built, &stored).await?;
         let cycle = plan_cycle(&PlanInput {
             icloud: &built.icloud,
             fastmail: &built.fastmail,
             state: &stored.contacts,
             winner: self.winner,
             replayed: &replayed,
+            photos: &photos,
         });
         let blocked = check_deletions(&cycle.plan, stored.contacts.len()).err();
         if dry_run {

@@ -103,6 +103,9 @@ impl CycleSummary {
             Op::Refresh { .. } => self.refreshed += 1,
             Op::Forget { .. } => self.forgotten += 1,
         }
+        if let Some(counter) = op.synced().and_then(|synced| synced.counter.as_ref()) {
+            self.toward_mut(counter.side).updated += 1;
+        }
     }
 
     /// Counts a failed op or an unsyncable card, by the side it would have
@@ -193,5 +196,37 @@ mod tests {
 
         assert_eq!((summary.to_icloud.added, summary.to_fastmail.updated), (1, 1));
         assert_eq!(target_side(&op), Some(Side::ICloud));
+    }
+
+    #[test]
+    fn a_counter_write_counts_as_an_update_on_its_side() {
+        let card = crate::contact::VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nFN:Jane\r\nEND:VCARD\r\n").unwrap();
+        let mut synced = crate::sync::SyncedCard::recorded(&card);
+        synced.counter = Some(crate::sync::CounterWrite {
+            side: Side::ICloud,
+            target: crate::sync::Resource {
+                href: crate::contact::Href::from("/i/u1.vcf"),
+                etag: crate::contact::ETag::from("i1"),
+            },
+            body: card,
+            change: crate::sync::PhotoChange::Set,
+        });
+        let op = Op::Update {
+            uid: crate::contact::Uid::from("u1"),
+            to: Side::Fastmail,
+            target: crate::sync::Resource {
+                href: crate::contact::Href::from("/f/u1.vcf"),
+                etag: crate::contact::ETag::from("f1"),
+            },
+            source: crate::sync::Resource {
+                href: crate::contact::Href::from("/i/u1.vcf"),
+                etag: crate::contact::ETag::from("i1"),
+            },
+            synced,
+        };
+
+        let summary = CycleSummary::planned(std::slice::from_ref(&op));
+
+        assert_eq!((summary.to_fastmail.updated, summary.to_icloud.updated), (1, 1));
     }
 }

@@ -189,6 +189,13 @@ impl SyncService {
     /// no change since their stored tokens and no failing card is due. When
     /// idle, stores the fresh tokens.
     pub(super) async fn idle(&self, stored: &Stored, collections: &Collections, now: DateTime<Utc>) -> Result<bool, Error> {
+        // An untracked row (pre-upgrade, or a new pair recorded by an Adopt,
+        // Conflict or Recreate that wrote nothing) still owes its first photo
+        // cycle (CG-15 R4, Decision 1). Empty deltas say nothing about it, so
+        // the cycle must run until every row is tracked.
+        if stored.contacts.iter().any(|row| !row.photo.tracked) {
+            return Ok(false);
+        }
         if !stored.pending.is_empty() {
             return Ok(false);
         }

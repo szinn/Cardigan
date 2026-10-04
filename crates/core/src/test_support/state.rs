@@ -110,6 +110,14 @@ impl InMemoryState {
         *self.fail_next_write.lock().expect(POISONED) = true;
     }
 
+    /// Resets every row's photo state to untracked, as migration 000007 does
+    /// on upgrade.
+    pub fn untrack_photos(&self) {
+        for row in &mut self.tables().contacts {
+            row.photo = crate::state::PhotoState::default();
+        }
+    }
+
     #[must_use]
     pub fn contacts(&self) -> Vec<ContactState> {
         self.tables().contacts.clone()
@@ -218,7 +226,7 @@ impl ContactStateRepository for InMemoryState {
             fastmail: new.fastmail,
             content_hash: new.content_hash,
             hash_version: new.hash_version,
-            photo_stripped: new.photo_stripped,
+            photo: new.photo,
             last_synced_vcard: new.last_synced_vcard,
             last_synced_at: new.last_synced_at,
             created_at: STAMP,
@@ -505,7 +513,7 @@ mod tests {
     use crate::{
         contact::{CANONICAL_VERSION, ETag, VCard},
         repository::{read_only_transaction, transaction},
-        state::{ConflictOrigin, FailureOp, FailureReason, SideState},
+        state::{ConflictOrigin, FailureOp, FailureReason, PhotoState, SideState},
         sync::SYNC_HASH,
     };
 
@@ -522,7 +530,7 @@ mod tests {
             fastmail: side(format!("/f/{uid}.vcf")),
             content_hash: card.canonical_hash(SYNC_HASH),
             hash_version: CANONICAL_VERSION,
-            photo_stripped: false,
+            photo: PhotoState::default(),
             last_synced_vcard: card,
             last_synced_at: STAMP,
         }

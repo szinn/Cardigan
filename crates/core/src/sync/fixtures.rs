@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use super::{Entry, Resource, SYNC_HASH, Snapshot, UnsyncedCard};
 use crate::{
     contact::{CANONICAL_VERSION, ETag, Href, VCard},
-    state::{ContactState, SideState},
+    state::{ContactState, PhotoState, SideState},
 };
 
 /// An embedded photo line, as Fastmail stores photos.
@@ -29,6 +29,9 @@ pub(crate) fn res(href: &str, etag: &str) -> Resource {
     }
 }
 
+/// No photos downloaded: every card is photo-less or already known.
+pub(crate) static NO_PHOTOS: std::sync::LazyLock<crate::sync::FetchedPhotos> = std::sync::LazyLock::new(crate::sync::FetchedPhotos::new);
+
 /// A state row for `synced` (photo-less fixture cards), current hash version.
 pub(crate) fn row(id: u64, synced: &VCard, icloud: (&str, &str), fastmail: (&str, &str)) -> ContactState {
     let at = DateTime::<Utc>::UNIX_EPOCH;
@@ -45,7 +48,10 @@ pub(crate) fn row(id: u64, synced: &VCard, icloud: (&str, &str), fastmail: (&str
         fastmail: side(fastmail),
         content_hash: synced.canonical_hash(SYNC_HASH),
         hash_version: CANONICAL_VERSION,
-        photo_stripped: false,
+        photo: PhotoState {
+            tracked: true,
+            ..PhotoState::default()
+        },
         last_synced_vcard: synced.clone(),
         last_synced_at: at,
         created_at: at,

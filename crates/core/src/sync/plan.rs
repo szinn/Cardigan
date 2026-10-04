@@ -1,13 +1,13 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 use crate::{
     contact::{CardHash, DisplayIdentity, ETag, HashOptions, Href, Side, Uid, VCard, VCardError},
-    state::ConflictOrigin,
+    state::{ConflictOrigin, FailureReason, PhotoState},
 };
 
 /// The hash options for every content comparison in the sync engine: photos
-/// are not synced in v1, so no `PHOTO` property (URI or embedded) ever counts
-/// as content.
+/// are a separate dimension (CG-15), so no `PHOTO` property (URI or embedded)
+/// ever counts as content.
 pub const SYNC_HASH: HashOptions = HashOptions {
     exclude_photo: true,
     exclude_uid: false,
@@ -27,8 +27,36 @@ impl fmt::Display for Resource {
     }
 }
 
+/// What a write does to its target's photo (CG-15 R4, R8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PhotoChange {
+    /// No photo on either the body or the target.
+    #[default]
+    None,
+    /// The target's own `PHOTO` lines are written back byte-for-byte.
+    Kept,
+    /// The other side's photo replaces the target's.
+    Set,
+    /// Every `PHOTO` line is dropped.
+    Removed,
+    /// The photo could not fit on iCloud: the card goes without one
+    /// (Decision 1).
+    Stripped,
+}
+
+/// CG-15 Decision 4: a photo going to the side the op's main write does not
+/// write. PUT `body` over `target` (`If-Match`) on that side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterWrite {
+    pub side: Side,
+    pub target: Resource,
+    /// Full contact data (PII): never log it.
+    pub body: VCard,
+    pub change: PhotoChange,
+}
+
 /// The card both sides hold once an op completes, in the form the state row
-/// records it: without photos, which are not synced in v1.
+/// records it: without photos, which are a separate dimension (CG-15).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncedCard {
     /// The card as the state row records it (`last_synced_vcard`), with every
@@ -39,10 +67,18 @@ pub struct SyncedCard {
     /// `card.canonical_hash(SYNC_HASH)` under `CANONICAL_VERSION`: the state
     /// row's `content_hash`.
     pub content_hash: CardHash,
-    /// When set, PUT this instead of `card`: `card` plus the target card's own
-    /// `PHOTO` properties, so a write never removes the target's photo. The
-    /// state row still records `card`.
+    /// The exact PUT body when it differs from `card`: `card` with the
+    /// target's own photo kept, or with the photo being set. The state row
+    /// still records `card`.
     pub put_with_photo: Option<VCard>,
+    /// What the main write does to the target's photo.
+    pub photo: PhotoChange,
+    /// The row's photo state after the op (default: untracked, so a path
+    /// that never sets it fills gaps next cycle, Decision 5).
+    pub photos: PhotoState,
+    /// The other side's photo write, when the photo goes against the main
+    /// write's direction.
+    pub counter: Option<CounterWrite>,
 }
 
 impl SyncedCard {
@@ -51,6 +87,9 @@ impl SyncedCard {
     pub fn for_push(source: &VCard, target: Option<&VCard>) -> Self {
         let mut synced = Self::recorded(source);
         synced.put_with_photo = target.map(|target| synced.card.with_photos_of(target)).filter(|put| *put != synced.card);
+        if synced.put_with_photo.is_some() {
+            synced.photo = PhotoChange::Kept;
+        }
         synced
     }
 
@@ -63,7 +102,16 @@ impl SyncedCard {
             card,
             content_hash,
             put_with_photo: None,
+            photo: PhotoChange::None,
+            photos: PhotoState::default(),
+            counter: None,
         }
+    }
+
+    /// With the row's photo state after the op.
+    #[must_use]
+    pub fn with_photos(self, photos: PhotoState) -> Self {
+        Self { photos, ..self }
     }
 
     /// The bytes to PUT.
@@ -229,6 +277,21 @@ impl Op {
         }
     }
 
+    /// The card this op syncs, for every op that carries one.
+    pub fn synced(&self) -> Option<&SyncedCard> {
+        match self {
+            Self::Create { synced, .. }
+            | Self::Update { synced, .. }
+            | Self::Conflict { synced, .. }
+            | Self::Resurrect { synced, .. }
+            | Self::CopyGroup { synced, .. }
+            | Self::Adopt { synced, .. }
+            | Self::Recreate { synced, .. }
+            | Self::Refresh { synced: Some(synced), .. } => Some(synced),
+            Self::Delete { .. } | Self::Refresh { synced: None, .. } | Self::Forget { .. } => None,
+        }
+    }
+
     /// The spec's per-record log op. `None` for state-only ops, which only
     /// count in the cycle summary.
     pub fn log_op(&self) -> Option<&'static str> {
@@ -241,9 +304,26 @@ impl Op {
     }
 }
 
-/// ` photo-kept` when the PUT keeps the target card's own photo.
-fn kept(synced: &SyncedCard) -> &'static str {
-    if synced.put_with_photo.is_some() { " photo-kept" } else { "" }
+/// The op line's photo note: ` photo-kept`, ` photo=set|removed|stripped`,
+/// then ` +photo→<side>=<change>` for a counter write.
+fn kept(synced: &SyncedCard) -> String {
+    let mut note = match synced.photo {
+        PhotoChange::Kept if synced.put_with_photo.is_some() => " photo-kept".to_owned(),
+        PhotoChange::Set => " photo=set".to_owned(),
+        PhotoChange::Removed => " photo=removed".to_owned(),
+        PhotoChange::Stripped => " photo=stripped".to_owned(),
+        _ => String::new(),
+    };
+    if let Some(counter) = &synced.counter {
+        let change = match counter.change {
+            PhotoChange::Set => "set",
+            PhotoChange::Removed => "removed",
+            PhotoChange::Stripped => "stripped",
+            PhotoChange::None | PhotoChange::Kept => "kept",
+        };
+        let _ = write!(note, " +photo→{}={change}", counter.side);
+    }
+    note
 }
 
 /// One line, PII-free: sides, UID, hrefs and ETags only.
@@ -343,6 +423,10 @@ pub enum Diagnostic {
     /// warns. `identity` is for the baseline report only: `Display` prints
     /// UIDs and sides.
     DeleteHeld { on: Side, uid: Uid, with: Uid, identity: DisplayIdentity },
+    /// CG-15: the photo of the iCloud card at `href` could not be downloaded.
+    /// The contact is held this cycle on both sides, so a failed download is
+    /// never read as a removed photo. CG-8 records a read failure.
+    PhotoUnavailable { href: Href, etag: ETag, uid: Uid, reason: FailureReason },
 }
 
 impl fmt::Display for Diagnostic {
@@ -363,6 +447,7 @@ impl fmt::Display for Diagnostic {
             Self::UnreadTarget { side, uid, target } => write!(f, "unread target {side} uid={uid} {target}"),
             Self::DeletionDeferred { side, uid } => write!(f, "deletion deferred on {side} uid={uid}: unreadable card on that side"),
             Self::DeleteHeld { on, uid, with, .. } => write!(f, "delete held on {on} uid={uid}: may be the same contact as uid={with}"),
+            Self::PhotoUnavailable { href, etag, uid, reason } => write!(f, "photo unavailable icloud uid={uid} {href}@{etag}: {}", reason.as_str()),
         }
     }
 }

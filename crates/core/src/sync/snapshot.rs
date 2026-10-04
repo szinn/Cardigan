@@ -77,7 +77,8 @@ pub struct FetchLists {
 /// listing order. For every row, when one side's card is fetched or gone from
 /// its stored href, the other side's card is fetched as well, so a write to it
 /// can keep its photo and never replaces a card the daemon has not read
-/// (Decision 7).
+/// (Decision 7). A row whose photos are not yet tracked has both its listed
+/// sides fetched, so the planner can record them (CG-15 Decision 2).
 pub fn fetch_lists(icloud: &[(Href, ETag)], fastmail: &[(Href, ETag)], state: &[ContactState]) -> FetchLists {
     let mut lists = FetchLists {
         icloud: changed(Side::ICloud, icloud, state),
@@ -93,10 +94,11 @@ pub fn fetch_lists(icloud: &[(Href, ETag)], fastmail: &[(Href, ETag)], state: &[
     let mut extra_fastmail = Vec::new();
     for row in state {
         let (i, f) = (&row.icloud.href, &row.fastmail.href);
-        if touched(f, &fastmail_listed, &fastmail_fetch) && icloud_listed.contains(i) && !icloud_fetch.contains(i) {
+        let untracked = !row.photo.tracked;
+        if (untracked || touched(f, &fastmail_listed, &fastmail_fetch)) && icloud_listed.contains(i) && !icloud_fetch.contains(i) {
             extra_icloud.push(i.clone());
         }
-        if touched(i, &icloud_listed, &icloud_fetch) && fastmail_listed.contains(f) && !fastmail_fetch.contains(f) {
+        if (untracked || touched(i, &icloud_listed, &icloud_fetch)) && fastmail_listed.contains(f) && !fastmail_fetch.contains(f) {
             extra_fastmail.push(f.clone());
         }
     }
@@ -190,5 +192,19 @@ mod tests {
         assert_eq!(hrefs, ["/a.vcf", "/b.vcf"]);
         assert_eq!(snapshot.len(), 2);
         assert!(!snapshot.is_empty());
+    }
+
+    #[test]
+    fn untracked_rows_are_fetched_on_both_sides() {
+        let mut untracked = state();
+        untracked[0].photo.tracked = false;
+        let mut tracked = state();
+        tracked[0].photo.tracked = true;
+
+        let fetch = lists(&[("/i/u1.vcf", "i1")], &[("/f/u1.vcf", "f1")], &untracked);
+        assert_eq!((fetch.icloud, fetch.fastmail), (hrefs(&["/i/u1.vcf"]), hrefs(&["/f/u1.vcf"])));
+
+        let fetch = lists(&[("/i/u1.vcf", "i1")], &[("/f/u1.vcf", "f1")], &tracked);
+        assert_eq!((fetch.icloud, fetch.fastmail), (hrefs(&[]), hrefs(&[])));
     }
 }

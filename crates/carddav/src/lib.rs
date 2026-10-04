@@ -9,6 +9,7 @@ mod discovery;
 mod error;
 mod href;
 mod multiget;
+mod photo;
 mod sync;
 #[cfg(test)]
 mod test_util;
@@ -17,3 +18,4 @@ mod xml;
 
 pub use adapter::CardDavAddressBook;
 pub use config::{CardDavConfig, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MULTIGET_BATCH, DEFAULT_REQUEST_TIMEOUT, ProviderQuirks};
+pub use photo::IcloudPhotoFetcher;

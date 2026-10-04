@@ -8,9 +8,9 @@ use super::{Collections, SyncService, href::mint_href};
 use crate::{
     AddressBookError, Error,
     addressbook::Precondition,
-    contact::{CANONICAL_VERSION, ETag, Href, Side, Uid, VCard},
-    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, NewPendingRecreate, SideState},
-    sync::{Op, Resource, SyncedCard},
+    contact::{CANONICAL_VERSION, CardPhoto, ETag, Href, PhotoUri, Side, Uid, VCard},
+    state::{ConflictOrigin, FailedCard, FailureOp, FailureReason, NewConflict, NewContactState, NewPendingRecreate, PhotoState, SideState},
+    sync::{Op, PhotoChange, Resource, SyncedCard},
     with_transaction,
 };
 
@@ -25,12 +25,14 @@ pub(super) struct StateWrite {
     pub(super) clear: Vec<(Side, Href)>,
     /// Completes a Recreate: removes its journal row in the same transaction.
     pub(super) recreated: bool,
+    /// `None` leaves the row's photo state as it is.
+    pub(super) photo: Option<PhotoState>,
 }
 
 impl StateWrite {
     /// A write naming `written` (the side the op wrote) and `source` (the
-    /// other side).
-    fn pushed(uid: &Uid, written: (Side, Resource), source: Resource, synced: &SyncedCard, clear: Vec<(Side, Href)>) -> Self {
+    /// other side), recording `photo`.
+    fn pushed(uid: &Uid, written: (Side, Resource), source: Resource, synced: &SyncedCard, clear: Vec<(Side, Href)>, photo: Option<PhotoState>) -> Self {
         let (to, resource) = written;
         let (icloud, fastmail) = match to {
             Side::ICloud => (resource, source),
@@ -43,6 +45,7 @@ impl StateWrite {
             synced: Some(synced.clone()),
             clear,
             recreated: false,
+            photo,
         }
     }
 }
@@ -61,10 +64,11 @@ impl SyncService {
         match op {
             Op::Create { uid, to, source, synced } | Op::Resurrect { uid, to, source, synced } => {
                 let href = mint_href(&collections.get(*to).addressbook_url, uid);
-                let resource = self.write_card(*to, href, synced.body(), Precondition::IfNoneMatch, written).await?;
+                let main = self
+                    .write_photo_card(*to, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written)
+                    .await?;
                 let clear = vec![(to.other(), source.href.clone())];
-                self.write_state(StateWrite::pushed(uid, (*to, resource), source.clone(), synced, clear), now)
-                    .await
+                self.write_pushed(uid, (*to, main), source, synced, clear, written, now).await
             }
             Op::Update {
                 uid,
@@ -74,10 +78,11 @@ impl SyncService {
                 synced,
             } => {
                 let precondition = Precondition::IfMatch(target.etag.clone());
-                let resource = self.write_card(*to, target.href.clone(), synced.body(), precondition, written).await?;
+                let main = self
+                    .write_photo_card(*to, target.href.clone(), synced.body(), synced.photo, precondition, written)
+                    .await?;
                 let clear = vec![(to.other(), source.href.clone())];
-                self.write_state(StateWrite::pushed(uid, (*to, resource), source.clone(), synced, clear), now)
-                    .await
+                self.write_pushed(uid, (*to, main), source, synced, clear, written, now).await
             }
             Op::Delete { uid, on, target } => {
                 self.book(*on).delete(&target.href, Some(&target.etag)).await?;
@@ -104,10 +109,11 @@ impl SyncService {
                 .await?;
                 let loser = winner.other();
                 let precondition = Precondition::IfMatch(target.etag.clone());
-                let resource = self.write_card(loser, target.href.clone(), synced.body(), precondition, written).await?;
+                let main = self
+                    .write_photo_card(loser, target.href.clone(), synced.body(), synced.photo, precondition, written)
+                    .await?;
                 let clear = vec![(*winner, source.href.clone()), (loser, target.href.clone())];
-                self.write_state(StateWrite::pushed(uid, (loser, resource), source.clone(), synced, clear), now)
-                    .await
+                self.write_pushed(uid, (loser, main), source, synced, clear, written, now).await
             }
             // Fastmail first (CG-14 triage F3): a failed iCloud create then
             // leaves an already-relinked group for the next cycle to copy.
@@ -121,9 +127,12 @@ impl SyncService {
                 let precondition = Precondition::IfMatch(source.etag.clone());
                 let fastmail_now = self.write_card(Side::Fastmail, source.href.clone(), rewritten, precondition, written).await?;
                 let href = mint_href(&collections.icloud.addressbook_url, uid);
-                let icloud_now = self.write_card(Side::ICloud, href, synced.body(), Precondition::IfNoneMatch, written).await?;
+                let (icloud_now, landed) = self
+                    .write_photo_card(Side::ICloud, href, synced.body(), synced.photo, Precondition::IfNoneMatch, written)
+                    .await?;
                 let clear = vec![(Side::Fastmail, source.href.clone())];
-                self.write_state(StateWrite::pushed(uid, (Side::ICloud, icloud_now), fastmail_now, synced, clear), now)
+                let photo = Some(landed_photos(uid, synced, landed));
+                self.write_state(StateWrite::pushed(uid, (Side::ICloud, icloud_now), fastmail_now, synced, clear, photo), now)
                     .await
             }
             // Op::Recreate's documented order, with the journal (CG-16)
@@ -179,6 +188,7 @@ impl SyncService {
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, old_fastmail.href.clone())],
                     recreated: true,
+                    photo: Some(synced.photos.clone()),
                 };
                 self.write_state(write, now).await
             }
@@ -190,6 +200,7 @@ impl SyncService {
                     synced: Some(synced.clone()),
                     clear: vec![(Side::ICloud, icloud.href.clone()), (Side::Fastmail, fastmail.href.clone())],
                     recreated: false,
+                    photo: Some(synced.photos.clone()),
                 };
                 self.write_state(write, now).await
             }
@@ -201,11 +212,85 @@ impl SyncService {
                     synced: synced.clone(),
                     clear: Vec::new(),
                     recreated: false,
+                    photo: synced.as_ref().map(|synced| synced.photos.clone()),
                 };
                 self.write_state(write, now).await
             }
             Op::Forget { uid } => self.drop_state(uid, Vec::new()).await,
         }
+    }
+
+    /// Completes a pushed op (`Create`, `Resurrect`, `Update`, `Conflict`)
+    /// once its main write landed: runs its counter write (CG-15 Decision 4),
+    /// then records both sides and the row's photo state, with what iCloud
+    /// made of a photo either write set on it (R5).
+    async fn write_pushed(
+        &self,
+        uid: &Uid,
+        main: (Side, (Resource, Option<Landed>)),
+        source: &Resource,
+        synced: &SyncedCard,
+        clear: Vec<(Side, Href)>,
+        written: &mut Written,
+        now: DateTime<Utc>,
+    ) -> Result<(), Error> {
+        let (to, (resource, mut landed)) = main;
+        let mut source = source.clone();
+        if let Some(counter) = &synced.counter {
+            let precondition = Precondition::IfMatch(counter.target.etag.clone());
+            let (counter_now, counter_landed) = self
+                .write_photo_card(counter.side, counter.target.href.clone(), &counter.body, counter.change, precondition, written)
+                .await?;
+            source = counter_now;
+            landed = landed.or(counter_landed);
+        }
+        let photo = Some(landed_photos(uid, synced, landed));
+        self.write_state(StateWrite::pushed(uid, (to, resource), source, synced, clear, photo), now)
+            .await
+    }
+
+    /// PUTs `body` and, when it set a photo on iCloud, reads the card back:
+    /// iCloud turns an inline photo into a fresh URI (R5, S3/S5). `None`
+    /// when there was nothing to read back.
+    ///
+    /// A read-back that fails after the PUT succeeded is not the op's
+    /// failure: the photo is on iCloud, only its URI is unknown. It lands as
+    /// `Inline` (the pushed hash recorded, no URI), so the next cycle
+    /// downloads the new URI and matches the hash. Failing the op instead
+    /// would record nothing, and the next cycle would see both photos
+    /// changed and could push a resized copy over Fastmail's original.
+    async fn write_photo_card(
+        &self,
+        side: Side,
+        href: Href,
+        body: &VCard,
+        change: PhotoChange,
+        precondition: Precondition,
+        written: &mut Written,
+    ) -> Result<(Resource, Option<Landed>), Error> {
+        let resource = self.write_card(side, href.clone(), body, precondition, written).await?;
+        if side != Side::ICloud || change != PhotoChange::Set {
+            return Ok((resource, None));
+        }
+        let back = match self.icloud.multiget(std::slice::from_ref(&href)).await {
+            Ok(result) => result.found.into_iter().next(),
+            Err(error) => {
+                tracing::warn!(side = %side, error = %error, "photo read-back failed; recording the pushed photo without its URI");
+                return Ok((resource, Some(Landed::Inline)));
+            }
+        };
+        let Some(back) = back else {
+            return Err(AddressBookError::Permanent(format!("{href} was gone right after it was written")).into());
+        };
+        if let Some(entry) = written.iter_mut().find(|(s, h, _)| *s == side && *h == href) {
+            entry.2 = Some(back.etag.clone());
+        }
+        let landed = match VCard::parse(back.body).ok().and_then(|card| card.photo()) {
+            Some(CardPhoto::Uri(uri)) => Landed::Uri(uri),
+            Some(_) => Landed::Inline,
+            None => Landed::Dropped,
+        };
+        Ok((Resource { href, etag: back.etag }, Some(landed)))
     }
 
     /// PUTs `card` at `href` and returns the resource with its new ETag.
@@ -249,6 +334,7 @@ impl SyncService {
                 synced,
                 clear,
                 recreated,
+                photo,
             } = write;
             let seen = |resource: Resource| SideState {
                 href: resource.href,
@@ -269,9 +355,11 @@ impl SyncService {
                     if let Some(synced) = synced {
                         row.content_hash = synced.content_hash;
                         row.hash_version = CANONICAL_VERSION;
-                        row.photo_stripped = false;
                         row.last_synced_vcard = synced.card;
                         row.last_synced_at = now;
+                    }
+                    if let Some(photo) = photo {
+                        row.photo = photo;
                     }
                     contact_state_repository.update(tx, row).await?;
                 }
@@ -285,7 +373,7 @@ impl SyncService {
                         fastmail: seen(fastmail),
                         content_hash: synced.content_hash,
                         hash_version: CANONICAL_VERSION,
-                        photo_stripped: false,
+                        photo: photo.unwrap_or_default(),
                         last_synced_vcard: synced.card,
                         last_synced_at: now,
                     };
@@ -326,6 +414,42 @@ impl SyncService {
             Ok(())
         })
     }
+}
+
+/// What iCloud holds after a write that set a photo on it, read back (R5).
+#[derive(Debug)]
+enum Landed {
+    /// iCloud turned the photo into this URI.
+    Uri(PhotoUri),
+    /// Kept inline: its bytes hash to the pushed hash.
+    Inline,
+    /// No photo, or a body that does not parse: iCloud did not keep it.
+    Dropped,
+}
+
+/// The row's photo state after `synced`'s op, given what iCloud made of a
+/// photo it set there (`None`: no iCloud photo write). The planner leaves the
+/// URI empty after a set. A dropped photo is recorded as stripped with no
+/// iCloud hash, so state matches the server and the Fastmail photo is kept:
+/// recording the pushed hash would read as a removal on iCloud next cycle.
+fn landed_photos(uid: &Uid, synced: &SyncedCard, landed: Option<Landed>) -> PhotoState {
+    let mut photos = synced.photos.clone();
+    match landed {
+        None | Some(Landed::Inline) => {}
+        Some(Landed::Uri(uri)) => photos.icloud_uri = Some(uri),
+        Some(Landed::Dropped) => {
+            tracing::warn!(
+                record = ?synced.card.display_identity().to_string(),
+                uid = %uid,
+                side = %Side::ICloud,
+                "photo not kept by icloud; kept on fastmail only"
+            );
+            photos.icloud_uri = None;
+            photos.icloud_hash = None;
+            photos.stripped = true;
+        }
+    }
+    photos
 }
 
 /// Errors that end the cycle rather than one card's op (Decision 6): the

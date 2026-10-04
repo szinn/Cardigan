@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use super::{Diagnostic, Entry, Op, PairPass, Skip, SkipReason, Snapshot};
+use super::{Diagnostic, Entry, Op, PairPass, PhotoChange, Skip, SkipReason, Snapshot};
 use crate::{
     contact::{DisplayIdentity, Href, MatchKeys, Side, Uid, VCard},
     state::{ConflictOrigin, ContactState},
@@ -196,6 +196,12 @@ pub struct BaselineReport {
     /// of another synced contact (`synced_duplicates`). Filled by
     /// `plan_cycle`, not by `build`.
     pub synced_duplicates: Vec<ReportDuplicate>,
+    /// Fastmail photos too large for iCloud: the iCloud card goes without
+    /// one (CG-15 Decision 1).
+    pub photos_stripped: Vec<ReportCopy>,
+    /// iCloud photos that could not be downloaded this cycle
+    /// (`Diagnostic::PhotoUnavailable`); retried later.
+    pub photos_unavailable: Vec<Diagnostic>,
 }
 
 impl BaselineReport {
@@ -227,6 +233,12 @@ impl BaselineReport {
                 Op::CopyGroup { uid, synced, .. } => report.copies.push(ReportCopy::new(uid, &synced.card, Side::ICloud)),
                 _ => {}
             }
+            if let Some(synced) = op.synced() {
+                let counter_stripped = synced.counter.as_ref().is_some_and(|counter| counter.change == PhotoChange::Stripped);
+                if synced.photo == PhotoChange::Stripped || counter_stripped {
+                    report.photos_stripped.push(ReportCopy::new(op.uid(), &synced.card, Side::ICloud));
+                }
+            }
         }
         report.unreadable = diagnostics
             .iter()
@@ -241,6 +253,11 @@ impl BaselineReport {
             .cloned()
             .collect();
         report.held_deletes = diagnostics.iter().filter(|d| matches!(d, Diagnostic::DeleteHeld { .. })).cloned().collect();
+        report.photos_unavailable = diagnostics
+            .iter()
+            .filter(|d| matches!(d, Diagnostic::PhotoUnavailable { .. }))
+            .cloned()
+            .collect();
         report
     }
 }
@@ -318,7 +335,15 @@ impl fmt::Display for BaselineReport {
             f,
             "Synced contacts with no name that look like duplicates (delete one copy of each from a client that shows only one account):",
             &self.synced_duplicates,
-        )
+        )?;
+        section(f, "Photos too large for iCloud (kept on Fastmail only):", &self.photos_stripped)?;
+        if !self.photos_unavailable.is_empty() {
+            writeln!(f, "Photos not fetched (retried later):")?;
+            for diagnostic in &self.photos_unavailable {
+                writeln!(f, "  {diagnostic}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -498,6 +523,63 @@ mod tests {
         let lines: Vec<String> = synced_duplicates(&state).iter().map(ToString::to_string).collect();
 
         assert_eq!(lines, ["<no name> (KW pharmacy) uid=u1: like <no name> (KW pharmacy) uid=u2"]);
+    }
+
+    #[test]
+    fn stripped_and_unfetched_photos_have_their_own_sections() {
+        let mut stripped = SyncedCard::recorded(&card("u1", "Jane Doe"));
+        stripped.photo = PhotoChange::Stripped;
+        let mut counter = SyncedCard::recorded(&card("u2", "Bob Roe"));
+        counter.counter = Some(crate::sync::CounterWrite {
+            side: Side::ICloud,
+            target: res("/i/u2.vcf", "i2"),
+            body: card("u2", "Bob Roe"),
+            change: PhotoChange::Stripped,
+        });
+        let kept = SyncedCard::recorded(&card("u3", "Ann Poe"));
+        let ops = [
+            Op::Create {
+                uid: Uid::from("u1"),
+                to: Side::ICloud,
+                source: res("/f/u1.vcf", "f1"),
+                synced: stripped,
+            },
+            Op::Update {
+                uid: Uid::from("u2"),
+                to: Side::Fastmail,
+                target: res("/f/u2.vcf", "f2"),
+                source: res("/i/u2.vcf", "i2"),
+                synced: counter,
+            },
+            Op::Update {
+                uid: Uid::from("u3"),
+                to: Side::ICloud,
+                target: res("/i/u3.vcf", "i3"),
+                source: res("/f/u3.vcf", "f3"),
+                synced: kept,
+            },
+        ];
+        let diagnostics = [Diagnostic::PhotoUnavailable {
+            href: Href::from("/i/u4.vcf"),
+            etag: ETag::from("i4"),
+            uid: Uid::from("u4"),
+            reason: crate::state::FailureReason::Transient,
+        }];
+
+        let report = BaselineReport::build(&ops, &[], &diagnostics);
+
+        let stripped: Vec<&str> = report.photos_stripped.iter().map(|copy| copy.uid.as_str()).collect();
+        assert_eq!(stripped, ["u1", "u2"]);
+        assert_eq!(report.photos_unavailable.len(), 1);
+        let rendered = report.to_string();
+        assert!(
+            rendered.contains("Photos too large for iCloud (kept on Fastmail only):\n  Jane Doe uid=u1 → icloud\n  Bob Roe uid=u2 → icloud\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.ends_with("Photos not fetched (retried later):\n  photo unavailable icloud uid=u4 /i/u4.vcf@i4: transient\n"),
+            "{rendered}"
+        );
     }
 
     fn group(uid: &str, members: &[&str]) -> VCard {

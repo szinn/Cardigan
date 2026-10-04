@@ -1,10 +1,11 @@
 use super::{
-    Diagnostic, Op, Plan, Resource, SYNC_HASH, Snapshot, SyncedCard, Unsynced,
+    CounterWrite, Diagnostic, FetchedPhotos, Op, Plan, Resource, SYNC_HASH, Snapshot, SyncedCard, Unsynced,
+    photo::{self, Current, PhotoPlan},
     sides::{Present, SideView},
 };
 use crate::{
     contact::{CANONICAL_VERSION, CardHash, ConflictWinner, Side, Uid, VCard},
-    state::{ConflictOrigin, ContactState},
+    state::{ConflictOrigin, ContactState, PhotoState},
 };
 
 /// Everything one planning run needs.
@@ -20,6 +21,8 @@ pub struct PlanInput<'a> {
     /// finished before this cycle (CG-14). Planning ignores it; `plan_cycle`
     /// relinks groups with it. `&[]` when nothing was replayed.
     pub replayed: &'a [(Uid, Uid)],
+    /// iCloud photos downloaded for this cycle (CG-15).
+    pub photos: &'a FetchedPhotos,
 }
 
 /// The planner's result: ops for synced contacts, and the cards pairing
@@ -39,8 +42,10 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
     let mut ops = Vec::new();
     let mut diagnostics = icloud.diagnostics;
     diagnostics.extend(fastmail.diagnostics);
+    let (blocked, photo_diagnostics) = photo::blocked_photos(input.icloud, input.photos);
+    diagnostics.extend(photo_diagnostics);
     for row in input.state {
-        if icloud.held.contains(&row.uid) || fastmail.held.contains(&row.uid) {
+        if icloud.held.contains(&row.uid) || fastmail.held.contains(&row.uid) || blocked.contains(&row.uid) {
             continue;
         }
         let baseline = Baseline::of(row);
@@ -68,7 +73,7 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
             }
             continue;
         }
-        match decide(&baseline, i, f, input) {
+        match decide_with_photo(&baseline, i, f, input) {
             Some(Ok(op)) => ops.push(op),
             Some(Err(diagnostic)) => diagnostics.push(diagnostic),
             None => {}
@@ -78,8 +83,16 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
     // A UID held on one side (duplicated, UID-changed, or unreadable at its
     // synced href) must not reach pairing from the other side, or pairing
     // would Create a copy of a card the planner is still holding here.
-    let icloud_unsynced = icloud.unsynced.into_iter().filter(|c| !fastmail.held.contains(c.card.uid())).collect();
-    let fastmail_unsynced = fastmail.unsynced.into_iter().filter(|c| !icloud.held.contains(c.card.uid())).collect();
+    let icloud_unsynced = icloud
+        .unsynced
+        .into_iter()
+        .filter(|c| !fastmail.held.contains(c.card.uid()) && !blocked.contains(c.card.uid()))
+        .collect();
+    let fastmail_unsynced = fastmail
+        .unsynced
+        .into_iter()
+        .filter(|c| !icloud.held.contains(c.card.uid()) && !blocked.contains(c.card.uid()))
+        .collect();
 
     Planned {
         plan: Plan { ops, diagnostics },
@@ -100,10 +113,26 @@ enum Status<'a> {
     Deleted,
 }
 
-impl Status<'_> {
+impl<'a> Status<'a> {
     /// Whether this side has nothing at the row's tracked resource.
     fn is_deleted(&self) -> bool {
         matches!(self, Self::Deleted)
+    }
+
+    /// The card, when it was fetched.
+    fn card(&self) -> Option<&'a VCard> {
+        match self {
+            Self::Same(_, card) | Self::Changed(_, card) => Some(card),
+            Self::Unchanged(_) | Self::Deleted => None,
+        }
+    }
+
+    /// Where the card is, unless it is gone.
+    fn resource(&self) -> Option<Resource> {
+        match self {
+            Self::Unchanged(resource) | Self::Same(resource, _) | Self::Changed(resource, _) => Some(resource.clone()),
+            Self::Deleted => None,
+        }
     }
 
     /// The new resource to record when the card was fetched but not changed.
@@ -237,14 +266,229 @@ fn one_sided(uid: Uid, to: Side, source: Resource, card: &VCard, other: Status<'
     }
 }
 
+/// One value per side.
+type PerSide<T> = (T, T);
+
+/// Picks `side`'s value.
+fn on<T>(side: Side, (icloud, fastmail): PerSide<T>) -> T {
+    match side {
+        Side::ICloud => icloud,
+        Side::Fastmail => fastmail,
+    }
+}
+
+/// Decision 4's content op with the row's photo dimension merged in
+/// (CG-15 R3, R4). A side whose photo cannot be resolved (an iCloud URI
+/// neither recorded nor downloaded) leaves the content op as it is: the
+/// photo is never read as removed. An untracked row with a side that was
+/// not fetched also stays as it is, since that side's photo is unknown and
+/// recording it as "none" would later overwrite a differing photo.
+fn decide_with_photo(baseline: &Baseline<'_>, i: Status<'_>, f: Status<'_>, input: &PlanInput<'_>) -> Option<Result<Op, Diagnostic>> {
+    let row = baseline.row;
+    let side_photo = |side: Side, status: &Status<'_>| match status {
+        Status::Unchanged(_) => Ok(photo::recorded(side, &row.photo)),
+        Status::Same(_, card) | Status::Changed(_, card) => photo::current(side, card, Some(&row.photo), input.photos),
+        Status::Deleted => Ok(None),
+    };
+    let photos = side_photo(Side::ICloud, &i).and_then(|ip| Ok((ip, side_photo(Side::Fastmail, &f)?)));
+    let unread = matches!(i, Status::Unchanged(_)) || matches!(f, Status::Unchanged(_));
+    let row_view = RowView {
+        row,
+        cards: (i.card(), f.card()),
+        resources: (i.resource(), f.resource()),
+        winner: input.winner,
+    };
+    let op = decide(baseline, i, f, input);
+    match photos {
+        Ok(photos) if row.photo.tracked || !unread => merge_photo(&row_view, op, &photos),
+        _ if row.photo.tracked => keep_photo_state(op, &row.photo),
+        _ => op,
+    }
+}
+
+/// A tracked row whose photo was skipped keeps its recorded photo state: the
+/// content op's default (untracked) would make the next cycle treat the row
+/// as new. Only ops that keep both cards' photos in place qualify; a
+/// `Resurrect` writes a new card, so the recorded state no longer describes
+/// it and it stays untracked.
+fn keep_photo_state(mut op: Option<Result<Op, Diagnostic>>, recorded: &PhotoState) -> Option<Result<Op, Diagnostic>> {
+    if let Some(Ok(Op::Update { synced, .. } | Op::Conflict { synced, .. } | Op::Refresh { synced: Some(synced), .. })) = &mut op {
+        synced.photos = recorded.clone();
+    }
+    op
+}
+
+/// What `merge_photo` needs of a row besides its content op.
+struct RowView<'a> {
+    row: &'a ContactState,
+    /// Each side's card, when fetched.
+    cards: PerSide<Option<&'a VCard>>,
+    /// Each side's resource, unless deleted.
+    resources: PerSide<Option<Resource>>,
+    winner: Side,
+}
+
+/// Merges the row's photo plan into its content op (R4): at most one write
+/// per side.
+/// - An `Update` or `Conflict` carries the photo action for the side it writes;
+///   an action for the other side becomes its counter write.
+/// - A `Resurrect` copies the source's photo to the new card.
+/// - With no write (`Refresh` or nothing), a photo action becomes an `Update`
+///   whose content is the target's current card; a new photo state alone (a
+///   refreshed URI, a newly tracked row) is recorded by a `Refresh`.
+/// - `Delete`, `Forget` and refused ops are unchanged.
+fn merge_photo(view: &RowView<'_>, op: Option<Result<Op, Diagnostic>>, photos: &PerSide<Option<Current>>) -> Option<Result<Op, Diagnostic>> {
+    let row = view.row;
+    let (ip, fp) = photos;
+    let plan = photo::decide(Some(&row.photo), ip.as_ref(), fp.as_ref(), view.winner);
+    match op {
+        Some(Ok(Op::Update {
+            uid,
+            to,
+            target,
+            source,
+            mut synced,
+        })) => {
+            write_photos(view, &mut synced, to, &source, &plan, photos);
+            Some(Ok(Op::Update {
+                uid,
+                to,
+                target,
+                source,
+                synced,
+            }))
+        }
+        Some(Ok(Op::Conflict {
+            uid,
+            origin,
+            winner,
+            target,
+            source,
+            mut synced,
+            icloud_card,
+            fastmail_card,
+        })) => {
+            write_photos(view, &mut synced, winner.other(), &source, &plan, photos);
+            Some(Ok(Op::Conflict {
+                uid,
+                origin,
+                winner,
+                target,
+                source,
+                synced,
+                icloud_card,
+                fastmail_card,
+            }))
+        }
+        Some(Ok(Op::Resurrect { uid, to, source, mut synced })) => {
+            photo::copy_photo(&mut synced, to, on(to.other(), photos.clone()));
+            Some(Ok(Op::Resurrect { uid, to, source, synced }))
+        }
+        Some(Ok(Op::Refresh { uid, icloud, fastmail, synced })) => photo_only(view, uid, &(icloud, fastmail), synced, &plan, photos),
+        None => photo_only(view, row.uid.clone(), &(None, None), None, &plan, photos),
+        other => other,
+    }
+}
+
+/// An `Update` or `Conflict` writing `to` over its target: the action for
+/// `to` joins the write, an action for the other side becomes a counter
+/// write over `source` (Decision 4), and `synced.photos` is the row's next
+/// photo state.
+fn write_photos(view: &RowView<'_>, synced: &mut SyncedCard, to: Side, source: &Resource, plan: &PhotoPlan, (ip, fp): &PerSide<Option<Current>>) {
+    let (body, change, pushed) = photo::apply(to, &synced.card, on(to, view.cards), plan.on(to));
+    synced.put_with_photo = (body != synced.card).then_some(body);
+    synced.photo = change;
+    let pushed_to = Some((change, pushed.map(|p| p.hash)));
+    let other = to.other();
+    let action = plan.on(other);
+    let mut pushed_other = None;
+    if let (false, Some(card)) = (action.is_keep(), on(other, view.cards)) {
+        let (body, change, pushed) = photo::apply(other, &card.without_photos(), Some(card), action);
+        synced.counter = Some(CounterWrite {
+            side: other,
+            target: source.clone(),
+            body,
+            change,
+        });
+        pushed_other = Some((change, pushed.map(|p| p.hash)));
+    }
+    let (pushed_icloud, pushed_fastmail) = match to {
+        Side::ICloud => (pushed_to, pushed_other),
+        Side::Fastmail => (pushed_other, pushed_to),
+    };
+    synced.photos = photo::next_state(Some(&view.row.photo), ip.as_ref(), fp.as_ref(), plan, pushed_icloud, pushed_fastmail);
+}
+
+/// No content write: a photo action on one side becomes an `Update` of that
+/// side's own current card (content hash unchanged); otherwise a changed
+/// photo state is recorded by the `Refresh` (emitted or extended).
+fn photo_only(
+    view: &RowView<'_>,
+    uid: Uid,
+    refreshed: &PerSide<Option<Resource>>,
+    content: Option<SyncedCard>,
+    plan: &PhotoPlan,
+    (ip, fp): &PerSide<Option<Current>>,
+) -> Option<Result<Op, Diagnostic>> {
+    let row = view.row;
+    let refresh = |content: Option<SyncedCard>| {
+        let (icloud, fastmail) = refreshed.clone();
+        (icloud.is_some() || fastmail.is_some() || content.is_some()).then_some(Ok(Op::Refresh {
+            uid: uid.clone(),
+            icloud,
+            fastmail,
+            synced: content,
+        }))
+    };
+    let to = match (&plan.icloud, &plan.fastmail) {
+        (icloud, _) if !icloud.is_keep() => Side::ICloud,
+        (_, fastmail) if !fastmail.is_keep() => Side::Fastmail,
+        _ => {
+            let next = photo::next_state(Some(&row.photo), ip.as_ref(), fp.as_ref(), plan, None, None);
+            let content = match content {
+                Some(synced) => Some(synced.with_photos(next)),
+                None if next != row.photo => Some(SyncedCard::recorded(&row.last_synced_vcard).with_photos(next)),
+                None => None,
+            };
+            return refresh(content);
+        }
+    };
+    let (Some(target), Some(source)) = (on(to, view.resources.clone()), on(to.other(), view.resources.clone())) else {
+        return refresh(content);
+    };
+    let Some(card) = on(to, view.cards) else {
+        // Not fetched, so its own photo-free content is unknown: as
+        // `one_sided` does, never replace an unread card.
+        return Some(Err(Diagnostic::UnreadTarget { side: to, uid, target }));
+    };
+    let mut synced = SyncedCard::recorded(card);
+    let (body, change, pushed) = photo::apply(to, &synced.card, Some(card), plan.on(to));
+    synced.put_with_photo = (body != synced.card).then_some(body);
+    synced.photo = change;
+    let pushed = Some((change, pushed.map(|p| p.hash)));
+    let (pushed_icloud, pushed_fastmail) = match to {
+        Side::ICloud => (pushed, None),
+        Side::Fastmail => (None, pushed),
+    };
+    synced.photos = photo::next_state(Some(&row.photo), ip.as_ref(), fp.as_ref(), plan, pushed_icloud, pushed_fastmail);
+    Some(Ok(Op::Update {
+        uid,
+        to,
+        target,
+        source,
+        synced,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        contact::{ETag, VCardError},
+        contact::{ETag, PhotoData, PhotoHash, PhotoUri, VCardError},
+        state::FailureReason,
         sync::{
-            Entry,
-            fixtures::{EMBEDDED_PHOTO, URI_PHOTO, card, card_with, fetched, res, row, snapshot, unchanged},
+            Entry, PhotoChange,
+            fixtures::{EMBEDDED_PHOTO, NO_PHOTOS, URI_PHOTO, card, card_with, fetched, res, row, snapshot, unchanged},
         },
     };
 
@@ -255,6 +499,7 @@ mod tests {
             state,
             winner,
             replayed: &[],
+            photos: &NO_PHOTOS,
         }
     }
 
@@ -264,6 +509,14 @@ mod tests {
 
     fn state() -> Vec<ContactState> {
         vec![row(1, &synced(), ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))]
+    }
+
+    /// The photo state of a tracked row with no photo on either side.
+    fn no_photos() -> PhotoState {
+        PhotoState {
+            tracked: true,
+            ..PhotoState::default()
+        }
     }
 
     fn render(plan: &Plan) -> String {
@@ -364,7 +617,7 @@ mod tests {
                 to: Side::Fastmail,
                 target: res("/f/u1.vcf", "f1"),
                 source: res("/i/u1.vcf", "i2"),
-                synced: SyncedCard::for_push(&edited, Some(&synced())),
+                synced: SyncedCard::for_push(&edited, Some(&synced())).with_photos(no_photos()),
             }]
         );
     }
@@ -387,7 +640,7 @@ mod tests {
                 winner: Side::Fastmail,
                 target: res("/i/u1.vcf", "i2"),
                 source: res("/f/u1.vcf", "f2"),
-                synced: SyncedCard::for_push(&f_edit, Some(&i_edit)),
+                synced: SyncedCard::for_push(&f_edit, Some(&i_edit)).with_photos(no_photos()),
                 icloud_card: i_edit,
                 fastmail_card: f_edit,
             }]
@@ -409,7 +662,7 @@ mod tests {
                 uid: Uid::from("u1"),
                 icloud: Some(res("/i/u1.vcf", "i2")),
                 fastmail: Some(res("/f/u1.vcf", "f2")),
-                synced: Some(SyncedCard::recorded(&i_edit)),
+                synced: Some(SyncedCard::recorded(&i_edit).with_photos(no_photos())),
             }]
         );
     }
@@ -456,7 +709,7 @@ mod tests {
                 uid: Uid::from("u1"),
                 icloud: None,
                 fastmail: None,
-                synced: Some(SyncedCard::recorded(&synced())),
+                synced: Some(SyncedCard::recorded(&synced()).with_photos(no_photos())),
             }]
         );
 
@@ -527,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn resurrect_carries_no_photo() {
+    fn resurrect_with_an_unresolved_uri_puts_no_photo() {
         let i_edit = card_with("u1", "Jane Doe", &format!("NOTE:new\r\n{URI_PHOTO}"));
         let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
 
@@ -690,5 +943,347 @@ mod tests {
         let planned = plan(&input(&Snapshot::new(), &Snapshot::new(), &state, Side::ICloud));
 
         assert_eq!(render(&planned.plan), "forget uid=u2; forget uid=u1");
+    }
+
+    const JPEG: [u8; 4] = [0xFF, 0xD8, 0xFF, 1];
+    const PHOTO_URL: &str = "https://gateway.icloud.com/p1";
+    const PHOTO_URL2: &str = "https://gateway.icloud.com/p2";
+
+    fn photo_uri(url: &str) -> PhotoUri {
+        PhotoUri::from(url.to_owned())
+    }
+
+    fn with_uri(card: &VCard, url: &str) -> VCard {
+        let mut text = String::from_utf8(card.as_bytes().to_vec()).unwrap();
+        text = text.replace("END:VCARD", &format!("PHOTO;VALUE=uri:{url}\r\nEND:VCARD"));
+        VCard::parse(text).unwrap()
+    }
+
+    fn tracked_photos(icloud: Option<(&str, &[u8])>, fastmail: Option<&[u8]>) -> PhotoState {
+        PhotoState {
+            icloud_uri: icloud.map(|(u, _)| photo_uri(u)),
+            icloud_hash: icloud.map(|(_, b)| PhotoHash::of(b)),
+            fastmail_hash: fastmail.map(PhotoHash::of),
+            stripped: false,
+            tracked: true,
+        }
+    }
+
+    #[test]
+    fn a_photo_against_the_content_direction_becomes_a_counter_write() {
+        // Content edited on iCloud (→ Update to Fastmail); photo changed on
+        // Fastmail (→ must reach iCloud).
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState {
+            tracked: true,
+            ..PhotoState::default()
+        };
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", card_with("u1", "Jane Doe", "NOTE:new\r\n")))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", card("u1", "Jane Doe").with_inline_photo(&[0xFF, 0xD8, 0xFF, 1])))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        let [
+            Op::Update {
+                to: Side::Fastmail, synced, ..
+            },
+        ] = planned.plan.ops.as_slice()
+        else {
+            panic!("{}", planned.plan);
+        };
+        assert_eq!(synced.photo, PhotoChange::Kept, "Fastmail keeps its (new) photo");
+        let counter = synced.counter.as_ref().expect("the photo goes to iCloud");
+        assert_eq!((counter.side, counter.change), (Side::ICloud, PhotoChange::Set));
+        assert!(synced.photos.tracked && synced.photos.fastmail_hash.is_some());
+        // The counter write replaces iCloud's card, keeping its own content.
+        assert_eq!(counter.target, res("/i/u1.vcf", "i2"));
+        assert_eq!(
+            counter.body.canonical_hash(SYNC_HASH),
+            card_with("u1", "Jane Doe", "NOTE:new\r\n").canonical_hash(SYNC_HASH)
+        );
+        assert_eq!(synced.photos.icloud_hash, synced.photos.fastmail_hash);
+        assert_eq!(
+            planned.plan.to_string().trim(),
+            "update fastmail uid=u1 /f/u1.vcf@f2 photo-kept +photo→icloud=set"
+        );
+    }
+
+    #[test]
+    fn a_photo_only_change_is_an_update_with_unchanged_content() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState {
+            tracked: true,
+            ..PhotoState::default()
+        };
+        let icloud = snapshot([("/i/u1.vcf", fetched("i1", base.clone()))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", base.with_inline_photo(&[0xFF, 0xD8, 0xFF, 1])))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(planned.plan.to_string().trim(), "update icloud uid=u1 /i/u1.vcf@i1 photo=set");
+        let [Op::Update { source, synced, .. }] = planned.plan.ops.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(*source, res("/f/u1.vcf", "f2"), "Fastmail's new ETag is carried");
+        assert_eq!(synced.content_hash, state[0].content_hash, "content unchanged");
+        assert_eq!(synced.counter, None);
+    }
+
+    #[test]
+    fn a_refreshed_uri_is_recorded_without_a_write() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", with_uri(&base, PHOTO_URL2)))]);
+        let fastmail = snapshot([("/f/u1.vcf", unchanged("f1"))]);
+        let photos: FetchedPhotos = [(photo_uri(PHOTO_URL2), Ok(PhotoData::new(b"A".to_vec())))].into();
+
+        let planned = plan(&PlanInput {
+            photos: &photos,
+            ..input(&icloud, &fastmail, &state, Side::ICloud)
+        });
+
+        assert_eq!(planned.plan.to_string().trim(), "refresh uid=u1 icloud=/i/u1.vcf@i2 content");
+        let [Op::Refresh { synced: Some(synced), .. }] = planned.plan.ops.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(synced.photos.icloud_uri, Some(photo_uri(PHOTO_URL2)));
+        assert_eq!(synced.photos.icloud_hash, state[0].photo.icloud_hash);
+        assert_eq!(synced.content_hash, state[0].content_hash);
+    }
+
+    #[test]
+    fn an_unchanged_photo_writes_and_records_nothing() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        // Both fetched (a server rewrite each), photos as recorded.
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", with_uri(&base, PHOTO_URL)))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", base.with_inline_photo(b"A")))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(
+            render(&planned.plan),
+            "refresh uid=u1 icloud=/i/u1.vcf@i2 fastmail=/f/u1.vcf@f2",
+            "no write, no new photo state"
+        );
+    }
+
+    #[test]
+    fn a_photo_removed_with_a_content_edit_joins_the_update() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        // iCloud: content edited and photo removed. Fastmail: unchanged.
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", card_with("u1", "Jane Doe", "NOTE:new\r\n")))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.with_inline_photo(b"A")))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(planned.plan.to_string().trim(), "update fastmail uid=u1 /f/u1.vcf@f1 photo=removed");
+        let [Op::Update { synced, .. }] = planned.plan.ops.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(synced.body().photo(), None);
+        assert_eq!(synced.photos, tracked_photos(None, None));
+    }
+
+    #[test]
+    fn a_conflict_losers_photo_change_goes_to_the_winner_as_a_counter_write() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(None, None);
+        // Both edit content; Fastmail (the loser) also adds a photo.
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", card_with("u1", "Jane Doe", "NOTE:icloud\r\n")))]);
+        let f_card = card_with("u1", "Jane Doe", "NOTE:fastmail\r\n").with_inline_photo(&JPEG);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", f_card))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(
+            planned.plan.to_string().trim(),
+            "conflict(sync) icloud wins uid=u1 → fastmail /f/u1.vcf@f2 photo-kept +photo→icloud=set"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_uri_keeps_a_tracked_rows_photo_state() {
+        // iCloud edits content and has a URI neither recorded nor
+        // downloaded: the photo is skipped, and the content op must not
+        // reset the tracked row to untracked.
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        let i_edit = with_uri(&card_with("u1", "Jane Doe", "NOTE:new\r\n"), PHOTO_URL2);
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.with_inline_photo(b"A")))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        let [
+            Op::Update {
+                to: Side::Fastmail, synced, ..
+            },
+        ] = planned.plan.ops.as_slice()
+        else {
+            panic!("{}", planned.plan);
+        };
+        assert_eq!(synced.photos, state[0].photo);
+        assert_eq!(synced.body().photo(), base.with_inline_photo(b"A").photo(), "Fastmail keeps its photo");
+    }
+
+    #[test]
+    fn an_unresolved_uri_leaves_an_untracked_row_untracked() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState::default();
+        let i_edit = with_uri(&card_with("u1", "Jane Doe", "NOTE:new\r\n"), PHOTO_URL2);
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.clone()))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        let [Op::Update { synced, .. }] = planned.plan.ops.as_slice() else {
+            panic!("{}", planned.plan);
+        };
+        assert_eq!(synced.photos, PhotoState::default());
+    }
+
+    #[test]
+    fn resurrect_carries_the_source_photo() {
+        let base = card("u1", "Jane Doe");
+        let state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        let f_edit = card_with("u1", "Jane Doe", "NOTE:new\r\n").with_inline_photo(&JPEG);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", f_edit))]);
+
+        let planned = plan(&input(&Snapshot::new(), &fastmail, &state, Side::ICloud));
+
+        assert_eq!(planned.plan.to_string().trim(), "resurrect icloud uid=u1 from=/f/u1.vcf photo=set");
+        let [Op::Resurrect { synced, .. }] = planned.plan.ops.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(synced.photos.fastmail_hash, Some(PhotoHash::of(&JPEG)));
+        assert_eq!(synced.photos.icloud_hash, Some(PhotoHash::of(&JPEG)));
+        assert!(synced.photos.tracked);
+    }
+
+    #[test]
+    fn resurrect_from_a_recorded_icloud_uri_leaves_the_row_untracked() {
+        // iCloud's photo is unchanged since it was recorded, so it was not
+        // downloaded and has no bytes to copy: the row must not be recorded
+        // as settled with no Fastmail photo, or the photo never arrives.
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        let i_edit = with_uri(&card_with("u1", "Jane Doe", "NOTE:new\r\n"), PHOTO_URL);
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
+
+        let planned = plan(&input(&icloud, &Snapshot::new(), &state, Side::ICloud));
+
+        let [
+            Op::Resurrect {
+                to: Side::Fastmail, synced, ..
+            },
+        ] = planned.plan.ops.as_slice()
+        else {
+            panic!("{}", planned.plan);
+        };
+        assert!(!synced.photos.tracked, "filled by next cycle's untracked handling");
+        assert_eq!(synced.photos, PhotoState::default());
+        assert_eq!((synced.photo, &synced.put_with_photo), (PhotoChange::None, &None));
+    }
+
+    #[test]
+    fn a_photo_only_change_never_replaces_an_unread_card() {
+        // A tracked row whose Fastmail photo changed while iCloud was not
+        // fetched: the photo would replace a card not read this cycle.
+        let base = card("u1", "Jane Doe");
+        let state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        let icloud = snapshot([("/i/u1.vcf", unchanged("i1"))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", base.with_inline_photo(&JPEG)))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(render(&planned.plan), "! unread target icloud uid=u1 /i/u1.vcf@i1");
+    }
+
+    #[test]
+    fn an_untracked_row_fills_a_gap_and_becomes_tracked() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState::default();
+        let icloud = snapshot([("/i/u1.vcf", fetched("i1", base.clone()))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.with_inline_photo(&JPEG)))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(render(&planned.plan), "update icloud uid=u1 /i/u1.vcf@i1 photo=set");
+
+        // Both sides without a photo: only the tracked flag is recorded.
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.clone()))]);
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+        assert_eq!(render(&planned.plan), "refresh uid=u1 icloud=/i/u1.vcf@i1 fastmail=/f/u1.vcf@f1 content");
+        let [Op::Refresh { synced: Some(synced), .. }] = planned.plan.ops.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(synced.photos, tracked_photos(None, None));
+    }
+
+    #[test]
+    fn an_untracked_row_with_an_unread_side_stays_untracked() {
+        // Its photo there is unknown: recording "none" would later read a
+        // real photo as added and overwrite the other side's (Decision 2).
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState::default();
+        let icloud = snapshot([("/i/u1.vcf", unchanged("i1"))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", base.with_inline_photo(&JPEG)))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        assert_eq!(render(&planned.plan), "refresh uid=u1 fastmail=/f/u1.vcf@f2");
+    }
+
+    fn failed_photo() -> FetchedPhotos {
+        [(PhotoUri::from(URI_PHOTO_URL.to_owned()), Err(FailureReason::Transient))].into()
+    }
+
+    const URI_PHOTO_URL: &str = "https://p1-contacts.icloud.com/photo/abc";
+
+    #[test]
+    fn a_failed_photo_download_holds_a_synced_contacts_op() {
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", card_with("u1", "Jane Doe", URI_PHOTO)))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", card("u1", "Jane Edited")))]);
+        let photos = failed_photo();
+        let state = state();
+
+        let planned = plan(&PlanInput {
+            photos: &photos,
+            ..input(&icloud, &fastmail, &state, Side::ICloud)
+        });
+
+        assert!(planned.plan.ops.is_empty(), "held: {}", render(&planned.plan));
+        assert!(matches!(
+            planned.plan.diagnostics.as_slice(),
+            [Diagnostic::PhotoUnavailable { uid, reason: FailureReason::Transient, .. }] if uid.as_str() == "u1"
+        ));
+    }
+
+    #[test]
+    fn a_failed_photo_download_keeps_both_unsynced_cards_out_of_pairing() {
+        let icloud = snapshot([("/i/u1.vcf", fetched("i1", card_with("u1", "Jane Doe", URI_PHOTO)))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", card("u1", "Jane Doe")))]);
+        let photos = failed_photo();
+
+        let planned = plan(&PlanInput {
+            photos: &photos,
+            ..input(&icloud, &fastmail, &[], Side::ICloud)
+        });
+
+        assert!(planned.unsynced.icloud.is_empty(), "iCloud card held");
+        assert!(planned.unsynced.fastmail.is_empty(), "Fastmail twin held");
     }
 }

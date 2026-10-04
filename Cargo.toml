@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/cardigan", "crates/carddav", "crates/integration-tests"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.98"
 repository = "https://github.com/szinn/Cardigan"
@@ -23,20 +23,15 @@ thiserror = "2.0.21"
 # Database
 sea-orm = { version = "2.0.4", features = [
     "debug-print",
-    "postgres-array",
     "runtime-tokio-rustls",
-    "sqlx-postgres",
     "sqlx-sqlite",
-    "sqlx-mysql",
     "with-chrono",
     "with-json",
     "with-rust_decimal",
     "with-uuid",
 ] }
 sea-orm-migration = { version = "2.0.4", features = [
-    "sqlx-postgres",
     "sqlx-sqlite",
-    "sqlx-mysql",
     "runtime-tokio-rustls",
     "with-chrono",
     "with-json",
@@ -44,6 +39,12 @@ sea-orm-migration = { version = "2.0.4", features = [
     "with-uuid",
 ] }
 sqlx = "0.9.0"
+
+# Images
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
 
 # CardDAV
 httpdate = "1.0.3"
@@ -68,6 +69,7 @@ tokio-graceful-shutdown = "0.20.0"
 tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
 
 # Utility
+base64 = "0.22.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 derive_builder = "0.20.2"
 sha2 = "0.11.0"
@@ -88,7 +90,7 @@ tracing-subscriber = { version = "0.3.23", features = [
 ] }
 
 # Testing
-insta = { version = "1.48.0", features = ["filters"] }
+insta = { version = "1.49.0", features = ["filters"] }
 tempfile = "3.27.0"
 testcontainers = "0.27.3"
 wiremock = "0.6.5"
