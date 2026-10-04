@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2](https://github.com/szinn/Cardigan/compare/v0.1.1..v0.1.2) - 2026-10-04
+
+### Features
+
+- _(cg-core)_ Relink groups after a replayed recreate; report unmapped members - ([0e0c376](https://github.com/szinn/Cardigan/commit/0e0c3762c4f318a1248d4b559bc53d4586a9b341))
+- _(cg-core)_ Relink copied groups after a re-UID - ([e702603](https://github.com/szinn/Cardigan/commit/e702603b2d89daca827342f54346762565d2cfc3))
+- _(cg-core)_ Add Op::CopyGroup - ([7db2a68](https://github.com/szinn/Cardigan/commit/7db2a68a7833f7a38e99966f0294f41f6a825197))
+- _(cg-core)_ Rewrite group member UIDs in a vCard - ([33c278e](https://github.com/szinn/Cardigan/commit/33c278eb91e7594b0b3d075e1fd89cab33776864))
+
+### Testing
+
+- _(cg-core)_ Cover unmapped-member reporting and relink edge cases - ([dad20df](https://github.com/szinn/Cardigan/commit/dad20df8bd4ca4dffb8aa27013f7ee05eb5cbeb7))
+
 ## [0.1.1](https://github.com/szinn/Cardigan/compare/v0.1.0..v0.1.1) - 2026-09-29
 
 ### Bug Fixes

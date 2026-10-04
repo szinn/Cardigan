@@ -646,7 +646,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cardigan"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -698,7 +698,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "cg-carddav"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "cg-core",
@@ -716,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "cg-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "cg-database"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "cg-core",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "integration-tests"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "cg-carddav",
