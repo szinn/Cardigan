@@ -266,6 +266,11 @@ impl SyncService {
                     run.summary.deferred += 1;
                     tracing::warn!("deferred to a later cycle: {diagnostic}");
                 }
+                Diagnostic::PhotoUnavailable { href, etag, uid, reason } => {
+                    tracing::warn!(side = %Side::ICloud, uid = %uid, reason = reason.as_str(), "card not synced: photo unavailable");
+                    cards.push(read_failure(Side::ICloud, href, Some(uid), Some(etag.clone()), *reason));
+                    run.summary.failed(Some(Side::Fastmail));
+                }
                 Diagnostic::DeleteHeld { .. } => {
                     // UIDs and sides only in `Display` (Decision 12); the
                     // row stays synced, so no card failure.

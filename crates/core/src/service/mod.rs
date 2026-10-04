@@ -6,6 +6,7 @@ mod apply;
 mod executor;
 mod href;
 mod listing;
+mod photos;
 mod replay;
 mod summary;
 #[cfg(test)]
@@ -124,7 +125,6 @@ pub struct SyncService {
     icloud: Arc<dyn AddressBook>,
     fastmail: Arc<dyn AddressBook>,
     /// Downloads iCloud photos before planning (CG-15 R6).
-    #[allow(dead_code, reason = "Task 5 wires the downloads in")]
     photos: Arc<dyn PhotoFetcher>,
     repository_service: Arc<RepositoryService>,
     winner: ConflictWinner,
@@ -183,12 +183,14 @@ impl SyncService {
         }
         let listed = self.list(&collections).await?;
         let built = self.build(&listed, &stored, now).await?;
+        let photos = self.download_photos(&built, &stored).await?;
         let cycle = plan_cycle(&PlanInput {
             icloud: &built.icloud,
             fastmail: &built.fastmail,
             state: &stored.contacts,
             winner: self.winner,
             replayed: &replayed,
+            photos: &photos,
         });
         let blocked = check_deletions(&cycle.plan, stored.contacts.len()).err();
         if dry_run {

@@ -28,7 +28,6 @@ impl Clock for TestClock {
 struct Harness {
     icloud: Arc<InMemoryAddressBook>,
     fastmail: Arc<InMemoryAddressBook>,
-    #[allow(dead_code, reason = "Task 5's photo tests drive it")]
     photos: Arc<InMemoryPhotoFetcher>,
     state: Arc<InMemoryState>,
     clock: Arc<TestClock>,
@@ -1459,4 +1458,32 @@ async fn a_group_copied_after_a_replayed_recreate_lists_the_new_uid() {
     assert_eq!(h.icloud.card(&minted(ICLOUD_URL, "fm-g")).unwrap().1, relinked);
     assert_eq!(h.state.pending_recreates(), []);
     assert_eq!(h.state.contacts().len(), 2);
+}
+
+const PHOTO_URI: &str = "https://gateway.icloud.com/p/1";
+
+#[tokio::test]
+async fn photos_are_downloaded_once_before_planning() {
+    let h = Harness::new(Side::ICloud);
+    h.photos.serve(PHOTO_URI, vec![0xFF, 0xD8, 0xFF, 1]);
+    h.icloud
+        .external_put("/card/jane.vcf", vcard("u1", "Jane Doe", &format!("PHOTO;VALUE=uri:{PHOTO_URI}\r\n")));
+
+    h.dry_run().await;
+
+    assert_eq!(h.photos.fetches(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_photo_download_is_recorded_and_holds_the_card() {
+    let h = Harness::new(Side::ICloud);
+    h.photos.fail_next(PHOTO_URI, AddressBookError::Transient("timeout".into()));
+    h.icloud
+        .external_put("/card/jane.vcf", vcard("u1", "Jane Doe", &format!("PHOTO;VALUE=uri:{PHOTO_URI}\r\n")));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.added, 0, "not copied without its photo");
+    let failures = h.state.failures();
+    assert_eq!((failures[0].side, failures[0].reason), (Side::ICloud, FailureReason::Transient));
 }

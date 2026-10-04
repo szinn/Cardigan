@@ -1,5 +1,5 @@
 use super::{
-    Diagnostic, Op, Plan, Resource, SYNC_HASH, Snapshot, SyncedCard, Unsynced,
+    Diagnostic, FetchedPhotos, Op, Plan, Resource, SYNC_HASH, Snapshot, SyncedCard, Unsynced, photo,
     sides::{Present, SideView},
 };
 use crate::{
@@ -20,6 +20,8 @@ pub struct PlanInput<'a> {
     /// finished before this cycle (CG-14). Planning ignores it; `plan_cycle`
     /// relinks groups with it. `&[]` when nothing was replayed.
     pub replayed: &'a [(Uid, Uid)],
+    /// iCloud photos downloaded for this cycle (CG-15).
+    pub photos: &'a FetchedPhotos,
 }
 
 /// The planner's result: ops for synced contacts, and the cards pairing
@@ -39,8 +41,10 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
     let mut ops = Vec::new();
     let mut diagnostics = icloud.diagnostics;
     diagnostics.extend(fastmail.diagnostics);
+    let (blocked, photo_diagnostics) = photo::blocked_photos(input.icloud, input.photos);
+    diagnostics.extend(photo_diagnostics);
     for row in input.state {
-        if icloud.held.contains(&row.uid) || fastmail.held.contains(&row.uid) {
+        if icloud.held.contains(&row.uid) || fastmail.held.contains(&row.uid) || blocked.contains(&row.uid) {
             continue;
         }
         let baseline = Baseline::of(row);
@@ -78,8 +82,16 @@ pub fn plan(input: &PlanInput<'_>) -> Planned {
     // A UID held on one side (duplicated, UID-changed, or unreadable at its
     // synced href) must not reach pairing from the other side, or pairing
     // would Create a copy of a card the planner is still holding here.
-    let icloud_unsynced = icloud.unsynced.into_iter().filter(|c| !fastmail.held.contains(c.card.uid())).collect();
-    let fastmail_unsynced = fastmail.unsynced.into_iter().filter(|c| !icloud.held.contains(c.card.uid())).collect();
+    let icloud_unsynced = icloud
+        .unsynced
+        .into_iter()
+        .filter(|c| !fastmail.held.contains(c.card.uid()) && !blocked.contains(c.card.uid()))
+        .collect();
+    let fastmail_unsynced = fastmail
+        .unsynced
+        .into_iter()
+        .filter(|c| !icloud.held.contains(c.card.uid()) && !blocked.contains(c.card.uid()))
+        .collect();
 
     Planned {
         plan: Plan { ops, diagnostics },
@@ -241,10 +253,11 @@ fn one_sided(uid: Uid, to: Side, source: Resource, card: &VCard, other: Status<'
 mod tests {
     use super::*;
     use crate::{
-        contact::{ETag, VCardError},
+        contact::{ETag, PhotoUri, VCardError},
+        state::FailureReason,
         sync::{
             Entry,
-            fixtures::{EMBEDDED_PHOTO, URI_PHOTO, card, card_with, fetched, res, row, snapshot, unchanged},
+            fixtures::{EMBEDDED_PHOTO, NO_PHOTOS, URI_PHOTO, card, card_with, fetched, res, row, snapshot, unchanged},
         },
     };
 
@@ -255,6 +268,7 @@ mod tests {
             state,
             winner,
             replayed: &[],
+            photos: &NO_PHOTOS,
         }
     }
 
@@ -690,5 +704,45 @@ mod tests {
         let planned = plan(&input(&Snapshot::new(), &Snapshot::new(), &state, Side::ICloud));
 
         assert_eq!(render(&planned.plan), "forget uid=u2; forget uid=u1");
+    }
+
+    fn failed_photo() -> FetchedPhotos {
+        [(PhotoUri::from(URI_PHOTO_URL.to_owned()), Err(FailureReason::Transient))].into()
+    }
+
+    const URI_PHOTO_URL: &str = "https://p1-contacts.icloud.com/photo/abc";
+
+    #[test]
+    fn a_failed_photo_download_holds_a_synced_contacts_op() {
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", card_with("u1", "Jane Doe", URI_PHOTO)))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f2", card("u1", "Jane Edited")))]);
+        let photos = failed_photo();
+        let state = state();
+
+        let planned = plan(&PlanInput {
+            photos: &photos,
+            ..input(&icloud, &fastmail, &state, Side::ICloud)
+        });
+
+        assert!(planned.plan.ops.is_empty(), "held: {}", render(&planned.plan));
+        assert!(matches!(
+            planned.plan.diagnostics.as_slice(),
+            [Diagnostic::PhotoUnavailable { uid, reason: FailureReason::Transient, .. }] if uid.as_str() == "u1"
+        ));
+    }
+
+    #[test]
+    fn a_failed_photo_download_keeps_both_unsynced_cards_out_of_pairing() {
+        let icloud = snapshot([("/i/u1.vcf", fetched("i1", card_with("u1", "Jane Doe", URI_PHOTO)))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", card("u1", "Jane Doe")))]);
+        let photos = failed_photo();
+
+        let planned = plan(&PlanInput {
+            photos: &photos,
+            ..input(&icloud, &fastmail, &[], Side::ICloud)
+        });
+
+        assert!(planned.unsynced.icloud.is_empty(), "iCloud card held");
+        assert!(planned.unsynced.fastmail.is_empty(), "Fastmail twin held");
     }
 }

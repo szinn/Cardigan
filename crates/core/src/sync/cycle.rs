@@ -40,7 +40,7 @@ mod tests {
         state::ContactState,
         sync::{
             Entry, SkipReason, Snapshot,
-            fixtures::{card, card_with, fetched, row, unchanged},
+            fixtures::{NO_PHOTOS, card, card_with, fetched, row, unchanged},
         },
     };
 
@@ -62,6 +62,7 @@ mod tests {
             state,
             winner,
             replayed: &[],
+            photos: &NO_PHOTOS,
         })
     }
 

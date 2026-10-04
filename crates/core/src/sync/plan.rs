@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     contact::{CardHash, DisplayIdentity, ETag, HashOptions, Href, Side, Uid, VCard, VCardError},
-    state::ConflictOrigin,
+    state::{ConflictOrigin, FailureReason},
 };
 
 /// The hash options for every content comparison in the sync engine: photos
@@ -343,6 +343,10 @@ pub enum Diagnostic {
     /// warns. `identity` is for the baseline report only: `Display` prints
     /// UIDs and sides.
     DeleteHeld { on: Side, uid: Uid, with: Uid, identity: DisplayIdentity },
+    /// CG-15: the photo of the iCloud card at `href` could not be downloaded.
+    /// The contact is held this cycle on both sides, so a failed download is
+    /// never read as a removed photo. CG-8 records a read failure.
+    PhotoUnavailable { href: Href, etag: ETag, uid: Uid, reason: FailureReason },
 }
 
 impl fmt::Display for Diagnostic {
@@ -363,6 +367,7 @@ impl fmt::Display for Diagnostic {
             Self::UnreadTarget { side, uid, target } => write!(f, "unread target {side} uid={uid} {target}"),
             Self::DeletionDeferred { side, uid } => write!(f, "deletion deferred on {side} uid={uid}: unreadable card on that side"),
             Self::DeleteHeld { on, uid, with, .. } => write!(f, "delete held on {on} uid={uid}: may be the same contact as uid={with}"),
+            Self::PhotoUnavailable { href, etag, uid, reason } => write!(f, "photo unavailable icloud uid={uid} {href}@{etag}: {}", reason.as_str()),
         }
     }
 }
