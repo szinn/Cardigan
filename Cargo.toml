@@ -68,6 +68,7 @@ tokio-graceful-shutdown = "0.20.0"
 tokio-util = { version = "0.7.19", default-features = false, features = ["rt"] }
 
 # Utility
+base64 = "0.22.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 derive_builder = "0.20.2"
 sha2 = "0.11.0"

@@ -2,8 +2,10 @@
 //! I/O, no async, no tracing.
 
 mod model;
+mod photo;
 mod vcard;
 
 pub(crate) use model::string_id;
 pub use model::{ConflictWinner, ETag, Href, Side, Uid};
+pub use photo::{CardPhoto, PhotoData, PhotoHash, PhotoHashError, PhotoUri};
 pub use vcard::{CANONICAL_VERSION, CardHash, DisplayIdentity, HashOptions, MatchKeys, Param, Property, VCard, VCardError};
