@@ -48,7 +48,7 @@ jobs:
         run: |
           if test "$GITHUB_EVENT_NAME" == "workflow_dispatch"; then
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "tag_version=Cardigan:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag_version=cardigan:${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
             echo "version=$(echo $GITHUB_REF | cut -d / -f 3)" >> "$GITHUB_OUTPUT"
             echo "tag_version=cardigan:$(echo $GITHUB_REF | cut -d / -f 3)" >> "$GITHUB_OUTPUT"
