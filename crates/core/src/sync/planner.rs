@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     contact::{CANONICAL_VERSION, CardHash, ConflictWinner, Side, Uid, VCard},
-    state::{ConflictOrigin, ContactState},
+    state::{ConflictOrigin, ContactState, PhotoState},
 };
 
 /// Everything one planning run needs.
@@ -301,8 +301,21 @@ fn decide_with_photo(baseline: &Baseline<'_>, i: Status<'_>, f: Status<'_>, inpu
     let op = decide(baseline, i, f, input);
     match photos {
         Ok(photos) if row.photo.tracked || !unread => merge_photo(&row_view, op, &photos),
+        _ if row.photo.tracked => keep_photo_state(op, &row.photo),
         _ => op,
     }
+}
+
+/// A tracked row whose photo was skipped keeps its recorded photo state: the
+/// content op's default (untracked) would make the next cycle treat the row
+/// as new. Only ops that keep both cards' photos in place qualify; a
+/// `Resurrect` writes a new card, so the recorded state no longer describes
+/// it and it stays untracked.
+fn keep_photo_state(mut op: Option<Result<Op, Diagnostic>>, recorded: &PhotoState) -> Option<Result<Op, Diagnostic>> {
+    if let Some(Ok(Op::Update { synced, .. } | Op::Conflict { synced, .. } | Op::Refresh { synced: Some(synced), .. })) = &mut op {
+        synced.photos = recorded.clone();
+    }
+    op
 }
 
 /// What `merge_photo` needs of a row besides its content op.
@@ -472,7 +485,7 @@ mod tests {
     use super::*;
     use crate::{
         contact::{ETag, PhotoData, PhotoHash, PhotoUri, VCardError},
-        state::{FailureReason, PhotoState},
+        state::FailureReason,
         sync::{
             Entry, PhotoChange,
             fixtures::{EMBEDDED_PHOTO, NO_PHOTOS, URI_PHOTO, card, card_with, fetched, res, row, snapshot, unchanged},
@@ -767,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn resurrect_carries_no_photo() {
+    fn resurrect_with_an_unresolved_uri_puts_no_photo() {
         let i_edit = card_with("u1", "Jane Doe", &format!("NOTE:new\r\n{URI_PHOTO}"));
         let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
 
@@ -1094,6 +1107,49 @@ mod tests {
             planned.plan.to_string().trim(),
             "conflict(sync) icloud wins uid=u1 → fastmail /f/u1.vcf@f2 photo-kept +photo→icloud=set"
         );
+    }
+
+    #[test]
+    fn an_unresolved_uri_keeps_a_tracked_rows_photo_state() {
+        // iCloud edits content and has a URI neither recorded nor
+        // downloaded: the photo is skipped, and the content op must not
+        // reset the tracked row to untracked.
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = tracked_photos(Some((PHOTO_URL, b"A")), Some(b"A"));
+        let i_edit = with_uri(&card_with("u1", "Jane Doe", "NOTE:new\r\n"), PHOTO_URL2);
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.with_inline_photo(b"A")))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        let [
+            Op::Update {
+                to: Side::Fastmail, synced, ..
+            },
+        ] = planned.plan.ops.as_slice()
+        else {
+            panic!("{}", planned.plan);
+        };
+        assert_eq!(synced.photos, state[0].photo);
+        assert_eq!(synced.body().photo(), base.with_inline_photo(b"A").photo(), "Fastmail keeps its photo");
+    }
+
+    #[test]
+    fn an_unresolved_uri_leaves_an_untracked_row_untracked() {
+        let base = card("u1", "Jane Doe");
+        let mut state = vec![row(1, &base, ("/i/u1.vcf", "i1"), ("/f/u1.vcf", "f1"))];
+        state[0].photo = PhotoState::default();
+        let i_edit = with_uri(&card_with("u1", "Jane Doe", "NOTE:new\r\n"), PHOTO_URL2);
+        let icloud = snapshot([("/i/u1.vcf", fetched("i2", i_edit))]);
+        let fastmail = snapshot([("/f/u1.vcf", fetched("f1", base.clone()))]);
+
+        let planned = plan(&input(&icloud, &fastmail, &state, Side::ICloud));
+
+        let [Op::Update { synced, .. }] = planned.plan.ops.as_slice() else {
+            panic!("{}", planned.plan);
+        };
+        assert_eq!(synced.photos, PhotoState::default());
     }
 
     #[test]

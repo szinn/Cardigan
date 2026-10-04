@@ -6,7 +6,7 @@ use crate::{Error, contact::PhotoUri};
 
 /// Driven port for downloading photos.
 #[async_trait::async_trait]
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(test, feature = "test-support"), mockall::automock)]
 pub trait PhotoFetcher: Send + Sync {
     /// The bytes behind an iCloud `PHOTO` URI. Errors use `AddressBookError`'s
     /// taxonomy: 401 `Unauthorized`, 429/503 `RateLimited`, 5xx/timeouts

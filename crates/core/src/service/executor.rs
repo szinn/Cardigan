@@ -252,6 +252,13 @@ impl SyncService {
     /// PUTs `body` and, when it set a photo on iCloud, reads the card back:
     /// iCloud turns an inline photo into a fresh URI (R5, S3/S5). `None`
     /// when there was nothing to read back.
+    ///
+    /// A read-back that fails after the PUT succeeded is not the op's
+    /// failure: the photo is on iCloud, only its URI is unknown. It lands as
+    /// `Inline` (the pushed hash recorded, no URI), so the next cycle
+    /// downloads the new URI and matches the hash. Failing the op instead
+    /// would record nothing, and the next cycle would see both photos
+    /// changed and could push a resized copy over Fastmail's original.
     async fn write_photo_card(
         &self,
         side: Side,
@@ -265,7 +272,13 @@ impl SyncService {
         if side != Side::ICloud || change != PhotoChange::Set {
             return Ok((resource, None));
         }
-        let back = self.icloud.multiget(std::slice::from_ref(&href)).await?.found.into_iter().next();
+        let back = match self.icloud.multiget(std::slice::from_ref(&href)).await {
+            Ok(result) => result.found.into_iter().next(),
+            Err(error) => {
+                tracing::warn!(side = %side, error = %error, "photo read-back failed; recording the pushed photo without its URI");
+                return Ok((resource, Some(Landed::Inline)));
+            }
+        };
         let Some(back) = back else {
             return Err(AddressBookError::Permanent(format!("{href} was gone right after it was written")).into());
         };

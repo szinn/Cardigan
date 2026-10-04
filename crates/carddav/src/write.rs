@@ -209,6 +209,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_forbidden_without_the_size_marker_is_permanent() {
+        let server = MockServer::start().await;
+        let adapter = discovered(&server).await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+            .mount(&server)
+            .await;
+
+        let error = adapter.put(&href("a"), CARD, Precondition::IfNoneMatch).await.unwrap_err();
+
+        assert!(matches!(error, Error::AddressBook(AddressBookError::Permanent(_))), "{error:?}");
+    }
+
+    #[tokio::test]
     async fn put_rate_limited() {
         let server = MockServer::start().await;
         let adapter = discovered(&server).await;

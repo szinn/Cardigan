@@ -1927,3 +1927,101 @@ async fn a_content_edit_keeps_photos_on_both_sides() {
     assert_eq!(h.photo_bytes(Side::ICloud, &href("/card/u1.vcf")).await.as_deref(), Some(JPEG_A));
     assert_settled(&h, 1).await;
 }
+
+#[tokio::test]
+async fn an_upgrade_after_a_settled_sync_still_runs_the_photo_cycle() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    let a = vcard("u1", "Jane Doe", &h.uri_photo("a", JPEG_A));
+    let uri_a = h.photos.serve("https://gateway.icloud.com/ext/a", JPEG_A.to_vec());
+    let tracked_a = PhotoState {
+        icloud_uri: Some(uri_a),
+        icloud_hash: Some(PhotoHash::of(JPEG_A)),
+        fastmail_hash: None,
+        stripped: false,
+        tracked: true,
+    };
+    // Pre-upgrade data a tracked row cannot express: a one-sided photo the
+    // first photo cycle must fill (u1), and differing photos it must keep (u2).
+    h.seed_pair("u1", &a, &vcard("u1", "Jane Doe", ""), tracked_a.clone()).await;
+    let b = vcard("u2", "Bob Roe", &h.uri_photo("a", JPEG_A));
+    let tracked_b = PhotoState {
+        fastmail_hash: Some(PhotoHash::of(JPEG_B)),
+        ..tracked_a
+    };
+    h.seed_pair("u2", &b, &vcard("u2", "Bob Roe", &inline(JPEG_B)), tracked_b).await;
+    h.settle().await;
+    assert!(h.token(Side::ICloud).is_some() && h.token(Side::Fastmail).is_some(), "tokens stored");
+    let before = h.writes();
+    h.state.untrack_photos();
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_fastmail.updated, 1, "{summary}");
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_A));
+    let touched_b = h
+        .icloud
+        .writes()
+        .into_iter()
+        .chain(h.fastmail.writes())
+        .any(|write| matches!(write, Write::Put { href, .. } | Write::Delete { href, .. } if href.as_str().contains("u2")));
+    assert!(!touched_b, "differing photos are kept as they are");
+    assert_eq!(h.writes(), before + 1, "only u1's Fastmail card is written");
+    assert!(photo_of(&h, "u1").tracked && photo_of(&h, "u2").tracked);
+    h.settle().await;
+    assert!(matches!(h.sync().await, CycleOutcome::Idle));
+    assert_eq!(h.writes(), before + 1);
+}
+
+#[tokio::test]
+async fn an_adopted_pair_gets_its_photo_within_two_cycles() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &h.uri_photo("a", JPEG_A)));
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", ""));
+
+    h.sync().await;
+    assert_eq!(h.writes(), 0, "an Adopt writes nothing");
+    h.sync().await;
+
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_A));
+    assert!(photo_of(&h, "u1").tracked);
+    h.settle().await;
+}
+
+#[tokio::test]
+async fn a_failed_read_back_never_sends_the_resized_photo_to_fastmail() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    let big = noisy_jpeg(2000);
+    // iCloud deleted the card, Fastmail edited it and added a photo too
+    // large for iCloud: a Resurrect pushes a resized copy to iCloud. iCloud
+    // has nothing to fetch, so the only iCloud multiget this cycle is the
+    // read-back after the PUT.
+    h.icloud.external_delete(&href("/card/u1.vcf"));
+    h.fastmail
+        .external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &format!("NOTE:edited\r\n{}", inline(&big))));
+    h.icloud.fail_next(BookOp::Multiget, AddressBookError::Permanent("read-back failed".into()));
+    let fastmail_puts = puts_to(&h, Side::Fastmail);
+
+    let summary = h.applied().await;
+
+    assert_eq!(
+        (summary.to_icloud.added, puts_to(&h, Side::ICloud)),
+        (1, 1),
+        "the resized photo reached iCloud: {summary}"
+    );
+    let photo = photo_of(&h, "u1");
+    assert_eq!(photo.icloud_uri, None, "the URI is unknown");
+    assert!(photo.icloud_hash.is_some() && photo.tracked, "the pushed hash is recorded: {photo:?}");
+    for _ in 0..3 {
+        h.advance(TimeDelta::seconds(61));
+        h.sync().await;
+    }
+    assert_eq!(puts_to(&h, Side::Fastmail), fastmail_puts, "no write to Fastmail");
+    assert_eq!(
+        h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await,
+        Some(big),
+        "Fastmail keeps its original"
+    );
+    assert_eq!(h.state.failures(), [], "nothing left failing");
+    assert!(matches!(h.sync().await, CycleOutcome::Idle));
+}

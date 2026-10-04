@@ -34,6 +34,9 @@ pub(crate) struct DavRequest {
     depth: Option<&'static str>,
     headers: Vec<(&'static str, String)>,
     body: Option<(Vec<u8>, &'static str)>,
+    /// Replaces `"METHOD /path"` in logs and errors when the path itself is
+    /// PII (a photo URI).
+    redacted: Option<&'static str>,
 }
 
 impl DavRequest {
@@ -44,6 +47,7 @@ impl DavRequest {
             depth: None,
             headers: Vec::new(),
             body: None,
+            redacted: None,
         }
     }
 
@@ -71,9 +75,21 @@ impl DavRequest {
         self
     }
 
-    /// `"METHOD /path"`, for logs and error messages.
+    /// Logs and errors name this request as `context` instead of by its
+    /// path.
+    #[must_use]
+    pub(crate) fn redacted_context(mut self, context: &'static str) -> Self {
+        self.redacted = Some(context);
+        self
+    }
+
+    /// `"METHOD /path"`, or the redacted context when set: the one name
+    /// `send` uses in every log line and error message.
     pub(crate) fn context(&self) -> String {
-        format!("{} {}", self.method, self.url.path())
+        match self.redacted {
+            Some(context) => context.to_owned(),
+            None => format!("{} {}", self.method, self.url.path()),
+        }
     }
 }
 

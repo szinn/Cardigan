@@ -110,6 +110,14 @@ impl InMemoryState {
         *self.fail_next_write.lock().expect(POISONED) = true;
     }
 
+    /// Resets every row's photo state to untracked, as migration 000007 does
+    /// on upgrade.
+    pub fn untrack_photos(&self) {
+        for row in &mut self.tables().contacts {
+            row.photo = crate::state::PhotoState::default();
+        }
+    }
+
     #[must_use]
     pub fn contacts(&self) -> Vec<ContactState> {
         self.tables().contacts.clone()

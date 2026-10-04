@@ -43,7 +43,8 @@ impl IcloudPhotoFetcher {
 
     /// GETs `url` (already allowed), mapping statuses like CardDAV.
     async fn fetch_from(&self, url: &Url) -> Result<Vec<u8>, AddressBookError> {
-        let response = self.http.send(DavRequest::new(Method::GET, url.clone())).await?;
+        let request = DavRequest::new(Method::GET, url.clone()).redacted_context("GET photo");
+        let response = self.http.send(request).await?;
         if !response.status.is_success() {
             return Err(response.error("GET photo", None));
         }
@@ -54,9 +55,12 @@ impl IcloudPhotoFetcher {
     }
 }
 
-/// https, and the host is `icloud.com` or a subdomain of it.
+/// https, no userinfo, and the host is `icloud.com` or a subdomain of it.
 fn allowed(url: &Url) -> bool {
-    url.scheme() == "https" && url.host_str().is_some_and(|host| host == "icloud.com" || host.ends_with(".icloud.com"))
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(|host| host == "icloud.com" || host.ends_with(".icloud.com"))
 }
 
 #[async_trait::async_trait]
@@ -81,7 +85,11 @@ mod tests {
 
     #[test]
     fn only_https_icloud_hosts_are_allowed() {
-        for ok in ["https://gateway.icloud.com/a", "https://p144-contacts.icloud.com/x"] {
+        for ok in [
+            "https://gateway.icloud.com/a",
+            "https://p144-contacts.icloud.com/x",
+            "https://GATEWAY.iCloud.COM/a",
+        ] {
             assert!(allowed(&Url::parse(ok).unwrap()), "{ok}");
         }
         for refused in [
@@ -89,6 +97,12 @@ mod tests {
             "https://evil.example/a",
             "https://icloud.com.evil.example/a",
             "https://noticloud.com/a",
+            "https://gateway.icloud.com@evil.example/a",
+            "https://u:p@x.icloud.com/a",
+            "https://u@x.icloud.com/a",
+            "https://gateway.icloud.com./a",
+            "https://17.0.0.1/a",
+            "https://[::1]/a",
         ] {
             assert!(!allowed(&Url::parse(refused).unwrap()), "{refused}");
         }
@@ -139,5 +153,67 @@ mod tests {
             fetcher.fetch_from(&Url::parse(&format!("{}/gone", server.uri())).unwrap()).await,
             Err(AddressBookError::Unauthorized)
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn no_photo_path_reaches_logs_or_errors() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/secret-ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"JPEG".to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/secret-denied"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/secret-missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let fetcher = IcloudPhotoFetcher::for_test(&server.uri(), "u", "p");
+        let at = |p: &str| Url::parse(&format!("{}{p}", server.uri())).unwrap();
+
+        fetcher.fetch_from(&at("/secret-ok")).await.unwrap();
+        fetcher.fetch_from(&at("/secret-denied")).await.unwrap_err();
+        let missing = fetcher.fetch_from(&at("/secret-missing")).await.unwrap_err();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let unreachable = fetcher
+            .fetch_from(&Url::parse(&format!("http://{closed}/secret-unreachable")).unwrap())
+            .await
+            .unwrap_err();
+
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(logs.contains("GET photo"), "requests are still logged:\n{logs}");
+        assert!(!logs.contains("secret"), "a photo path reached the logs:\n{logs}");
+        assert!(matches!(unreachable, AddressBookError::Transient(_)), "{unreachable:?}");
+        for error in [missing, unreachable] {
+            let text = format!("{error} {error:?}");
+            assert!(!text.contains("secret"), "a photo path reached an error: {text}");
+        }
     }
 }

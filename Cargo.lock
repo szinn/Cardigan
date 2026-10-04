@@ -709,6 +709,7 @@ dependencies = [
  "secrecy",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wiremock",
 ]
