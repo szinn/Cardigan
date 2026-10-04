@@ -277,6 +277,21 @@ impl Op {
         }
     }
 
+    /// The card this op syncs, for every op that carries one.
+    pub fn synced(&self) -> Option<&SyncedCard> {
+        match self {
+            Self::Create { synced, .. }
+            | Self::Update { synced, .. }
+            | Self::Conflict { synced, .. }
+            | Self::Resurrect { synced, .. }
+            | Self::CopyGroup { synced, .. }
+            | Self::Adopt { synced, .. }
+            | Self::Recreate { synced, .. }
+            | Self::Refresh { synced: Some(synced), .. } => Some(synced),
+            Self::Delete { .. } | Self::Refresh { synced: None, .. } | Self::Forget { .. } => None,
+        }
+    }
+
     /// The spec's per-record log op. `None` for state-only ops, which only
     /// count in the cycle summary.
     pub fn log_op(&self) -> Option<&'static str> {

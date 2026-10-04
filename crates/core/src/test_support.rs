@@ -10,7 +10,7 @@ use std::{
 use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, ChangeSet, Changes, Collection, FetchedCard, MultigetResult, PhotoFetcher, Precondition, SyncToken},
-    contact::{ETag, Href, PhotoUri},
+    contact::{ETag, Href, PhotoUri, VCard},
 };
 
 mod state;
@@ -67,6 +67,7 @@ struct State {
     valid_from: u64,
     writes: Vec<Write>,
     omit_etag_on_put: bool,
+    drop_photos_on_put: bool,
     failures: VecDeque<(Op, AddressBookError)>,
 }
 
@@ -82,6 +83,7 @@ impl InMemoryAddressBook {
                 valid_from: 0,
                 writes: Vec::new(),
                 omit_etag_on_put: false,
+                drop_photos_on_put: false,
                 failures: VecDeque::new(),
             }),
         }
@@ -119,6 +121,12 @@ impl InMemoryAddressBook {
     /// server that omits the `ETag` header.
     pub fn omit_etag_on_put(&self, omit: bool) {
         self.state().omit_etag_on_put = omit;
+    }
+
+    /// When on, successful `put`s store the card without its `PHOTO` lines,
+    /// like a server that silently drops a photo it would not keep.
+    pub fn drop_photos_on_put(&self, drop: bool) {
+        self.state().drop_photos_on_put = drop;
     }
 
     /// Fails the next call of `op` with `error`. Queued failures are consumed
@@ -275,7 +283,11 @@ impl AddressBook for InMemoryAddressBook {
             return Err(AddressBookError::PreconditionFailed { href: href.clone() }.into());
         }
 
-        let etag = state.store(href.clone(), body.to_vec());
+        let stored = match VCard::parse(body) {
+            Ok(card) if state.drop_photos_on_put => card.without_photos().as_bytes().to_vec(),
+            _ => body.to_vec(),
+        };
+        let etag = state.store(href.clone(), stored);
         Ok((!state.omit_etag_on_put).then_some(etag))
     }
 

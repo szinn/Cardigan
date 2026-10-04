@@ -15,7 +15,7 @@ use crate::{
     addressbook::SyncToken,
     contact::{CANONICAL_VERSION, ETag, Href, Side, Uid},
     state::{CardFailure, ContactState, FailedCard, FailureOp, FailureReason, NewBaselineSkip},
-    sync::{CyclePlan, Diagnostic, Op, SkipReason},
+    sync::{CyclePlan, Diagnostic, Op, PhotoChange, SkipReason},
     with_transaction,
 };
 
@@ -42,16 +42,9 @@ impl<'a> Run<'a> {
 
     /// The op's name and company: the only contact data a log line carries.
     pub(super) fn identity(&self, op: &Op) -> String {
-        let card = match op {
-            Op::Create { synced, .. }
-            | Op::Update { synced, .. }
-            | Op::Conflict { synced, .. }
-            | Op::Resurrect { synced, .. }
-            | Op::CopyGroup { synced, .. }
-            | Op::Adopt { synced, .. }
-            | Op::Recreate { synced, .. }
-            | Op::Refresh { synced: Some(synced), .. } => Some(&synced.card),
-            Op::Delete { .. } | Op::Refresh { synced: None, .. } | Op::Forget { .. } => self.contacts.get(op.uid()).map(|row| &row.last_synced_vcard),
+        let card = match op.synced() {
+            Some(synced) => Some(&synced.card),
+            None => self.contacts.get(op.uid()).map(|row| &row.last_synced_vcard),
         };
         card.map_or_else(|| "<unknown>".to_owned(), |card| card.display_identity().to_string())
     }
@@ -61,6 +54,24 @@ impl<'a> Run<'a> {
         if let (Some(log_op), Some(to)) = (op.log_op(), target_side(op)) {
             tracing::info!(record = ?self.identity(op), uid = %op.uid(), direction = %direction(to), op = log_op, "synced");
         }
+        let Some(synced) = op.synced() else { return };
+        let main = target_side(op).map(|to| (to, synced.photo));
+        let counter = synced.counter.as_ref().map(|counter| (counter.side, counter.change));
+        for (side, change) in main.into_iter().chain(counter) {
+            let Some(change_str) = photo_log(change) else { continue };
+            tracing::info!(record = ?self.identity(op), uid = %op.uid(), direction = %direction(side), photo = change_str, "photo synced");
+        }
+    }
+}
+
+/// How a photo log line names `change`; `None` when nothing moved. Never a
+/// URI or a size (R8).
+fn photo_log(change: PhotoChange) -> Option<&'static str> {
+    match change {
+        PhotoChange::Set => Some("copied"),
+        PhotoChange::Removed => Some("removed"),
+        PhotoChange::Stripped => Some("stripped"),
+        PhotoChange::None | PhotoChange::Kept => None,
     }
 }
 

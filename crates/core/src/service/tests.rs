@@ -139,7 +139,10 @@ impl Harness {
             },
             content_hash: synced.content_hash,
             hash_version: CANONICAL_VERSION,
-            photo: PhotoState::default(),
+            photo: PhotoState {
+                tracked: true,
+                ..PhotoState::default()
+            },
             last_synced_vcard: synced.card,
             last_synced_at: now,
         };
@@ -1384,7 +1387,12 @@ async fn a_copied_group_lists_its_members_under_their_new_uids() {
     assert_eq!(h.state.contacts().len(), 2);
 
     let before = h.writes();
-    assert_eq!(h.applied().await, CycleSummary::default(), "both writes come back as echoes");
+    // The Recreate's row (ic-1) is recorded untracked (CG-15 Decision 1), so
+    // one cycle fetches both its sides and records its photos; the group's
+    // row is already tracked.
+    let tracking = h.applied().await;
+    assert_eq!((tracking.refreshed, tracking.to_fastmail.fetched, tracking.to_icloud.fetched), (1, 1, 1));
+    assert!(matches!(h.sync().await, CycleOutcome::Idle), "both writes came back as echoes");
     assert_eq!(h.writes(), before);
 }
 
@@ -1486,4 +1494,126 @@ async fn a_failed_photo_download_is_recorded_and_holds_the_card() {
     assert_eq!(summary.to_fastmail.added, 0, "not copied without its photo");
     let failures = h.state.failures();
     assert_eq!((failures[0].side, failures[0].reason), (Side::ICloud, FailureReason::Transient));
+}
+
+/// A `StateWrite` naming `uid`'s seeded cards, with `photo`.
+fn photo_write(uid: &str, photo: Option<PhotoState>) -> executor::StateWrite {
+    let card = VCard::parse(vcard(uid, "Jane Doe", "")).unwrap();
+    let resource = |path: String, etag: &str| crate::sync::Resource {
+        href: href(&path),
+        etag: crate::contact::ETag::from(etag),
+    };
+    executor::StateWrite {
+        uid: Uid::from(uid),
+        icloud: Some(resource(format!("/card/{uid}.vcf"), "i1")),
+        fastmail: Some(resource(format!("/dav/{uid}.vcf"), "f1")),
+        synced: Some(SyncedCard::recorded(&card)),
+        clear: Vec::new(),
+        recreated: false,
+        photo,
+    }
+}
+
+#[tokio::test]
+async fn a_state_write_without_photo_state_keeps_the_rows() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    let stripped = PhotoState {
+        stripped: true,
+        tracked: true,
+        ..PhotoState::default()
+    };
+    h.service.write_state(photo_write("u1", Some(stripped.clone())), h.now()).await.unwrap();
+
+    h.service.write_state(photo_write("u1", None), h.now()).await.unwrap();
+
+    assert_eq!(h.state.contacts()[0].photo, stripped);
+}
+
+#[tokio::test]
+async fn a_state_write_with_photo_state_overwrites_the_rows() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    let stripped = PhotoState {
+        stripped: true,
+        tracked: true,
+        ..PhotoState::default()
+    };
+
+    h.service.write_state(photo_write("u1", Some(stripped.clone())), h.now()).await.unwrap();
+
+    assert_eq!(h.state.contacts()[0].photo, stripped);
+}
+
+#[tokio::test]
+async fn a_new_row_without_photo_state_starts_untracked() {
+    let h = Harness::new(Side::ICloud);
+
+    h.service.write_state(photo_write("u1", None), h.now()).await.unwrap();
+
+    assert_eq!(h.state.contacts()[0].photo, PhotoState::default());
+    assert!(!h.state.contacts()[0].photo.tracked);
+}
+
+/// The row's photo state for `uid`.
+fn photo_of(h: &Harness, uid: &str) -> PhotoState {
+    h.state.contacts().into_iter().find(|row| row.uid.as_str() == uid).expect("a state row").photo
+}
+
+/// Every Fastmail PUT so far.
+fn fastmail_puts(h: &Harness) -> usize {
+    h.fastmail.writes().iter().filter(|write| matches!(write, Write::Put { .. })).count()
+}
+
+#[tokio::test]
+async fn a_photo_icloud_drops_on_a_copy_is_recorded_as_stripped_and_kept_on_fastmail() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.drop_photos_on_put(true);
+    h.fastmail.external_put("/dav/bob.vcf", vcard("u2", "Bob Roe", PHOTO));
+
+    let summary = h.applied().await;
+
+    assert_eq!(summary.to_icloud.added, 1);
+    let photo = photo_of(&h, "u2");
+    assert_eq!(
+        (photo.icloud_hash, photo.icloud_uri.is_some(), photo.stripped),
+        (None, false, true),
+        "{photo:?}"
+    );
+
+    // An iCloud edit later goes to Fastmail without removing its photo.
+    let puts = fastmail_puts(&h);
+    h.settle().await;
+    assert_eq!(fastmail_puts(&h), puts, "nothing to write once recorded");
+    h.icloud.external_put(minted(ICLOUD_URL, "u2"), vcard("u2", "Bob Roe", "NOTE:edited\r\n"));
+    h.applied().await;
+    let body = String::from_utf8(h.fastmail.card(&href("/dav/bob.vcf")).unwrap().1).unwrap();
+    assert!(body.contains("NOTE:edited") && body.contains(PHOTO), "the Fastmail photo survives: {body}");
+}
+
+#[tokio::test]
+async fn a_photo_icloud_drops_on_a_counter_write_is_recorded_as_stripped() {
+    let h = Harness::new(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.icloud.drop_photos_on_put(true);
+    // iCloud edits the content; Fastmail adds a photo: the content goes to
+    // Fastmail, the photo comes back to iCloud as a counter write.
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", "NOTE:edited\r\n"));
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", PHOTO));
+
+    let summary = h.applied().await;
+
+    assert_eq!((summary.to_fastmail.updated, summary.to_icloud.updated), (1, 1), "{summary}");
+    let photo = photo_of(&h, "u1");
+    assert_eq!(
+        (photo.icloud_hash, photo.icloud_uri.is_some(), photo.stripped),
+        (None, false, true),
+        "{photo:?}"
+    );
+
+    let puts = fastmail_puts(&h);
+    h.settle().await;
+    assert_eq!(fastmail_puts(&h), puts, "no write to Fastmail once recorded");
+    let body = String::from_utf8(h.fastmail.card(&href("/dav/u1.vcf")).unwrap().1).unwrap();
+    assert!(body.contains(PHOTO), "the Fastmail photo survives: {body}");
 }
