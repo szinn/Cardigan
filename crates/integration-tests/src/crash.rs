@@ -70,13 +70,17 @@ async fn a_crash_after_the_recreate_delete_is_finished_from_the_journal() {
     h.restart().await;
     h.settle().await;
 
-    assert_eq!(h.icloud.writes(), 0, "the restarted engine recognised the write that already landed");
+    // CG-15: the adopted pair starts photo-untracked, so the next cycle
+    // fills the gap and copies Fastmail's photo to iCloud — one write, then
+    // settled.
+    assert_eq!(h.icloud.writes(), 1, "only the photo copy reaches iCloud");
     assert_eq!(h.fastmail.writes(), 1, "the restarted engine replays the recreate PUT from the journal");
     assert_converged(&h, "ic-1").await;
     assert!(
         h.cards(Side::Fastmail).await[0].body.contains("PHOTO"),
         "Fastmail kept its own card, photo included"
     );
+    assert!(h.cards(Side::ICloud).await[0].body.contains("PHOTO"), "iCloud received Fastmail's photo");
 }
 
 #[tokio::test]

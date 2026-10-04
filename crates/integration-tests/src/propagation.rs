@@ -116,12 +116,17 @@ async fn a_listing_larger_than_one_multiget_batch_syncs_every_card() {
 async fn deletes_that_cross_pairs_are_held() {
     // The 2026-09-27 incident: a nameless ORG-only duplicate and the named
     // card, each deleted on a different side by a client that merged them.
+    // The nameless card syncs first, on its own: added in the same cycle as
+    // the named card, CG-18 would skip it as a likely duplicate and there
+    // would be only one pair.
     let h = Harness::start().await;
     let a = h
         .put(Side::ICloud, "grill-a", &vcard("grill-a", "", "ORG:Harbor Grill\r\nTEL:+1 555 0100\r\n"))
         .await;
+    h.settle().await;
     h.put(Side::ICloud, "grill-b", &vcard("grill-b", "Harbor Grill", "TEL:+1 555 0100\r\n")).await;
     h.settle().await;
+    assert_eq!(h.contacts().await.len(), 2, "both cards are synced pairs");
     let b_on_fastmail = h
         .cards(Side::Fastmail)
         .await
