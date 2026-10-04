@@ -45,6 +45,9 @@ sea-orm-migration = { version = "2.0.3", features = [
 ] }
 sqlx = "0.9.0"
 
+# Images
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
 # CardDAV
 httpdate = "1.0.3"
 percent-encoding = "2.3.2"

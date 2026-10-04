@@ -1,10 +1,12 @@
 //! Contacts: identifiers shared by both sides and vCard handling. Pure — no
 //! I/O, no async, no tracing.
 
+mod fit;
 mod model;
 mod photo;
 mod vcard;
 
+pub use fit::{Fit, ICLOUD_MAX_CARD_BYTES, fit_photo};
 pub(crate) use model::string_id;
 pub use model::{ConflictWinner, ETag, Href, Side, Uid};
 pub use photo::{CardPhoto, PhotoData, PhotoHash, PhotoHashError, PhotoUri};
