@@ -61,7 +61,7 @@ COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=builder-server /app/target/x86_64-unknown-linux-musl/release/cardigan /app/cardigan
 
 LABEL org.opencontainers.image.source="https://github.com/szinn/Cardigan"
-LABEL org.opencontainers.image.description="Take Control Of Your Project Issues"
+LABEL org.opencontainers.image.description="Sync iCloud and Fastmail Contacts"
 
 WORKDIR /app
 USER cardigan
