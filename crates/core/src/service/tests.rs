@@ -4,7 +4,7 @@
 use super::{href::mint_href, *};
 use crate::{
     addressbook::{Changes, Precondition},
-    contact::{CANONICAL_VERSION, Href, Uid, VCard},
+    contact::{CANONICAL_VERSION, CardPhoto, Href, ICLOUD_MAX_CARD_BYTES, PhotoData, PhotoHash, Uid, VCard},
     repository::transaction,
     state::{
         CardFailureRepository, ConflictOrigin, ContactStateRepository, EndpointRepository, FailedCard, FailureOp, FailureReason, NewContactState,
@@ -120,10 +120,20 @@ impl Harness {
     /// state row, as after a completed sync.
     async fn seed_synced(&self, uid: &str, name: &str) {
         let body = vcard(uid, name, "");
+        let photo = PhotoState {
+            tracked: true,
+            ..PhotoState::default()
+        };
+        self.seed_pair(uid, &body, &body, photo).await;
+    }
+
+    /// `uid` stored as `icloud_body` and `fastmail_body` (equal apart from
+    /// photos) with its state row recording `photo`.
+    async fn seed_pair(&self, uid: &str, icloud_body: &str, fastmail_body: &str, photo: PhotoState) {
         let (icloud_href, fastmail_href) = (href(&format!("/card/{uid}.vcf")), href(&format!("/dav/{uid}.vcf")));
-        let icloud_etag = self.icloud.external_put(icloud_href.clone(), body.clone());
-        let fastmail_etag = self.fastmail.external_put(fastmail_href.clone(), body.clone());
-        let synced = SyncedCard::recorded(&VCard::parse(body).unwrap());
+        let icloud_etag = self.icloud.external_put(icloud_href.clone(), icloud_body);
+        let fastmail_etag = self.fastmail.external_put(fastmail_href.clone(), fastmail_body);
+        let synced = SyncedCard::recorded(&VCard::parse(icloud_body).unwrap());
         let now = self.now();
         let new = NewContactState {
             uid: Uid::from(uid),
@@ -139,10 +149,7 @@ impl Harness {
             },
             content_hash: synced.content_hash,
             hash_version: CANONICAL_VERSION,
-            photo: PhotoState {
-                tracked: true,
-                ..PhotoState::default()
-            },
+            photo,
             last_synced_vcard: synced.card,
             last_synced_at: now,
         };
@@ -1616,4 +1623,307 @@ async fn a_photo_icloud_drops_on_a_counter_write_is_recorded_as_stripped() {
     assert_eq!(fastmail_puts(&h), puts, "no write to Fastmail once recorded");
     let body = String::from_utf8(h.fastmail.card(&href("/dav/u1.vcf")).unwrap().1).unwrap();
     assert!(body.contains(PHOTO), "the Fastmail photo survives: {body}");
+}
+
+// ---- CG-15 end to end: iCloud-mode fake (S3, S5, S7) ----
+
+const JPEG_A: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+const JPEG_B: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 4, 5, 6];
+
+/// The `PHOTO` line(s) of a card carrying `bytes` inline, ending in `\r\n`.
+fn inline(bytes: &[u8]) -> String {
+    let card = VCard::parse(vcard("x", "x", "")).unwrap().with_inline_photo(bytes);
+    let text = String::from_utf8(card.into_bytes()).unwrap();
+    text[text.find("PHOTO").unwrap()..text.find("END:VCARD").unwrap()].to_owned()
+}
+
+fn photo_on(h: &Harness, side: Side, href: &Href) -> Option<CardPhoto> {
+    VCard::parse(h.book(side).card(href).unwrap().1).unwrap().photo()
+}
+
+impl Harness {
+    fn with_icloud_photos(winner: Side) -> Self {
+        let h = Self::new(winner);
+        h.icloud.icloud_photos(h.photos.clone(), ICLOUD_MAX_CARD_BYTES);
+        h
+    }
+
+    /// A `PHOTO;VALUE=uri:` line for a URI served with `bytes`, as an iCloud
+    /// client would leave it.
+    fn uri_photo(&self, name: &str, bytes: &[u8]) -> String {
+        let uri = self.photos.serve(&format!("https://gateway.icloud.com/ext/{name}"), bytes.to_vec());
+        format!("PHOTO;VALUE=uri:{}\r\n", uri.as_str())
+    }
+
+    /// The bytes of the photo on `side`'s card at `href`: inline, or fetched.
+    async fn photo_bytes(&self, side: Side, href: &Href) -> Option<Vec<u8>> {
+        match photo_on(self, side, href)? {
+            CardPhoto::Inline(data) => Some(data.bytes.to_vec()),
+            CardPhoto::Uri(uri) => Some(self.photos.fetch(&uri).await.expect("a served photo")),
+            CardPhoto::Unreadable => panic!("unreadable photo on {side}"),
+        }
+    }
+
+    /// `uid` synced with `bytes` as its photo on both sides (a URI on
+    /// iCloud, inline on Fastmail), recorded and tracked.
+    async fn seed_with_photo(&self, uid: &str, bytes: &[u8]) {
+        let uri = self.photos.serve(&format!("https://gateway.icloud.com/seed/{uid}"), bytes.to_vec());
+        let icloud = vcard(uid, "Jane Doe", &format!("PHOTO;VALUE=uri:{}\r\n", uri.as_str()));
+        let fastmail = vcard(uid, "Jane Doe", &inline(bytes));
+        let photo = PhotoState {
+            icloud_uri: Some(uri),
+            icloud_hash: Some(PhotoHash::of(bytes)),
+            fastmail_hash: Some(PhotoHash::of(bytes)),
+            stripped: false,
+            tracked: true,
+        };
+        self.seed_pair(uid, &icloud, &fastmail, photo).await;
+    }
+}
+
+/// Runs `cycles` more sync cycles and asserts none of them wrote to either
+/// side. A cycle may be applied (it sees the previous cycle's own writes) or
+/// idle (the previous cycle wrote nothing).
+async fn assert_settled(h: &Harness, cycles: usize) {
+    let before = h.writes();
+    for _ in 0..cycles {
+        h.sync().await;
+    }
+    assert_eq!(h.writes(), before, "settled");
+}
+
+fn puts_to(h: &Harness, side: Side) -> usize {
+    h.book(side).writes().iter().filter(|write| matches!(write, Write::Put { .. })).count()
+}
+
+/// A noisy JPEG that compresses badly: several hundred KB at 2000 px.
+fn noisy_jpeg(size: u32) -> Vec<u8> {
+    let mut seed: u32 = 1;
+    let image = image::RgbImage::from_fn(size, size, |_, _| {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        image::Rgb([(seed >> 16) as u8, (seed >> 8) as u8, seed as u8])
+    });
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Jpeg).unwrap();
+    bytes.into_inner()
+}
+
+#[tokio::test]
+async fn an_icloud_photo_reaches_fastmail_inline() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &h.uri_photo("a", JPEG_A)));
+
+    h.applied().await;
+
+    assert_eq!(
+        photo_on(&h, Side::Fastmail, &href("/dav/u1.vcf")),
+        Some(CardPhoto::Inline(PhotoData::new(JPEG_A.to_vec())))
+    );
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn a_fastmail_photo_change_reaches_icloud_and_settles() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &inline(JPEG_B)));
+
+    h.applied().await;
+
+    let Some(CardPhoto::Uri(uri)) = photo_on(&h, Side::ICloud, &href("/card/u1.vcf")) else {
+        panic!("iCloud stores a URI photo");
+    };
+    assert_eq!(h.photos.fetch(&uri).await.unwrap(), JPEG_B);
+    assert_eq!(photo_of(&h, "u1").icloud_uri, Some(uri), "the read-back URI is recorded");
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn a_resized_photo_never_flows_back() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_synced("u1", "Jane Doe").await;
+    let big = noisy_jpeg(2000);
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &inline(&big)));
+
+    h.applied().await;
+
+    assert!(matches!(photo_on(&h, Side::ICloud, &href("/card/u1.vcf")), Some(CardPhoto::Uri(_))));
+    let resized = h.photo_bytes(Side::ICloud, &href("/card/u1.vcf")).await.unwrap();
+    assert!(resized != big && resized.len() < big.len(), "iCloud holds a smaller copy");
+    assert_eq!(
+        h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await,
+        Some(big),
+        "Fastmail keeps its original"
+    );
+    assert_settled(&h, 2).await;
+}
+
+#[tokio::test]
+async fn an_unfittable_photo_is_stripped_and_not_retried() {
+    let h = Harness::new(Side::ICloud);
+    h.icloud.icloud_photos(h.photos.clone(), 2_000);
+    h.seed_synced("u1", "Jane Doe").await;
+    // The planner fits against ICLOUD_MAX_CARD_BYTES: an undecodable photo
+    // larger than that is unfittable (Decision 1). The fake's 2,000-byte
+    // limit rejects anything that slips through with a photo.
+    let unfittable = vec![0x5A; ICLOUD_MAX_CARD_BYTES + 20_000];
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &inline(&unfittable)));
+
+    let (cycle, _) = h.dry_run().await;
+    let uids: Vec<&str> = cycle.report.photos_stripped.iter().map(|copy| copy.uid.as_str()).collect();
+    assert_eq!(uids, ["u1"]);
+    assert!(cycle.report.to_string().contains("Photos too large for iCloud"), "{}", cycle.report);
+
+    h.applied().await;
+
+    assert_eq!(photo_on(&h, Side::ICloud, &href("/card/u1.vcf")), None);
+    assert!(photo_of(&h, "u1").stripped);
+    assert_eq!(h.state.failures(), [], "nothing failed");
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await, Some(unfittable));
+    assert_settled(&h, 2).await;
+}
+
+#[tokio::test]
+async fn a_photo_removal_syncs_both_ways() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_with_photo("u1", JPEG_A).await;
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", ""));
+
+    h.applied().await;
+
+    assert_eq!(photo_on(&h, Side::ICloud, &href("/card/u1.vcf")), None);
+    assert_settled(&h, 1).await;
+
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &h.uri_photo("b", JPEG_B)));
+    h.applied().await;
+
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn both_sides_change_the_photo_winner_decides() {
+    let h = Harness::with_icloud_photos(Side::Fastmail);
+    h.seed_synced("u1", "Jane Doe").await;
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &h.uri_photo("a", JPEG_A)));
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &inline(JPEG_B)));
+
+    h.applied().await;
+
+    assert_eq!(h.photo_bytes(Side::ICloud, &href("/card/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn the_first_cycle_after_upgrade_fills_gaps_only() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    let a = vcard("u1", "Jane Doe", &h.uri_photo("a", JPEG_A));
+    h.seed_pair("u1", &a, &vcard("u1", "Jane Doe", ""), PhotoState::default()).await;
+    let b = vcard("u2", "Bob Roe", &h.uri_photo("b", JPEG_A));
+    h.seed_pair("u2", &b, &vcard("u2", "Bob Roe", &inline(JPEG_B)), PhotoState::default()).await;
+
+    h.applied().await;
+
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_A));
+    let touched_b = h
+        .icloud
+        .writes()
+        .into_iter()
+        .chain(h.fastmail.writes())
+        .any(|write| matches!(write, Write::Put { href, .. } | Write::Delete { href, .. } if href.as_str().contains("u2")));
+    assert!(!touched_b, "differing photos are kept as they are");
+    assert!(photo_of(&h, "u1").tracked && photo_of(&h, "u2").tracked);
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u2.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn a_reupload_of_the_same_photo_writes_nothing() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_with_photo("u1", JPEG_A).await;
+    h.settle().await;
+    let before = h.writes();
+    let line = h.uri_photo("reupload", JPEG_A);
+    h.icloud.external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &line));
+
+    h.applied().await;
+
+    assert_eq!(h.writes(), before, "no write");
+    let Some(CardPhoto::Uri(uri)) = photo_on(&h, Side::ICloud, &href("/card/u1.vcf")) else {
+        panic!("iCloud keeps its URI photo");
+    };
+    let photo = photo_of(&h, "u1");
+    assert_eq!(photo.icloud_uri, Some(uri), "the recorded URI is refreshed");
+    assert_eq!(photo.icloud_hash, Some(PhotoHash::of(JPEG_A)));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn a_failed_photo_download_holds_the_contact() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_with_photo("u1", JPEG_A).await;
+    h.settle().await;
+    let uri = "https://gateway.icloud.com/ext/flaky";
+    h.photos.fail_next(uri, AddressBookError::Transient("timeout".into()));
+    h.icloud
+        .external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &format!("PHOTO;VALUE=uri:{uri}\r\n")));
+    let fastmail_writes = h.fastmail.writes().len();
+
+    h.applied().await;
+
+    assert_eq!(h.fastmail.writes().len(), fastmail_writes, "no write to Fastmail");
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_A));
+
+    h.advance(TimeDelta::seconds(61));
+    h.photos.serve(uri, JPEG_B.to_vec());
+    h.applied().await;
+
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn content_and_photo_crossing_both_arrive() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_with_photo("u1", JPEG_A).await;
+    h.settle().await;
+    let icloud_line = "PHOTO;VALUE=uri:https://gateway.icloud.com/seed/u1\r\n";
+    h.icloud
+        .external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &format!("NOTE:edited\r\n{icloud_line}")));
+    h.fastmail.external_put("/dav/u1.vcf", vcard("u1", "Jane Doe", &inline(JPEG_B)));
+    let (icloud_puts, fastmail_puts) = (puts_to(&h, Side::ICloud), puts_to(&h, Side::Fastmail));
+
+    h.applied().await;
+
+    assert_eq!(
+        (puts_to(&h, Side::ICloud) - icloud_puts, puts_to(&h, Side::Fastmail) - fastmail_puts),
+        (1, 1),
+        "one PUT per side"
+    );
+    let fastmail = String::from_utf8(h.fastmail.card(&href("/dav/u1.vcf")).unwrap().1).unwrap();
+    assert!(fastmail.contains("NOTE:edited"), "{fastmail}");
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert!(matches!(photo_on(&h, Side::ICloud, &href("/card/u1.vcf")), Some(CardPhoto::Uri(_))));
+    assert_eq!(h.photo_bytes(Side::ICloud, &href("/card/u1.vcf")).await.as_deref(), Some(JPEG_B));
+    assert_settled(&h, 1).await;
+}
+
+#[tokio::test]
+async fn a_content_edit_keeps_photos_on_both_sides() {
+    let h = Harness::with_icloud_photos(Side::ICloud);
+    h.seed_with_photo("u1", JPEG_A).await;
+    h.settle().await;
+    let icloud_line = "PHOTO;VALUE=uri:https://gateway.icloud.com/seed/u1\r\n";
+    h.icloud
+        .external_put("/card/u1.vcf", vcard("u1", "Jane Doe", &format!("NOTE:edited\r\n{icloud_line}")));
+
+    h.applied().await;
+
+    let fastmail = String::from_utf8(h.fastmail.card(&href("/dav/u1.vcf")).unwrap().1).unwrap();
+    assert!(fastmail.contains("NOTE:edited"), "{fastmail}");
+    assert_eq!(h.photo_bytes(Side::Fastmail, &href("/dav/u1.vcf")).await.as_deref(), Some(JPEG_A));
+    assert_eq!(h.photo_bytes(Side::ICloud, &href("/card/u1.vcf")).await.as_deref(), Some(JPEG_A));
+    assert_settled(&h, 1).await;
 }

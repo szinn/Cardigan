@@ -4,13 +4,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use crate::{
     AddressBookError, Error,
     addressbook::{AddressBook, ChangeSet, Changes, Collection, FetchedCard, MultigetResult, PhotoFetcher, Precondition, SyncToken},
-    contact::{ETag, Href, PhotoUri, VCard},
+    contact::{CardPhoto, ETag, Href, PhotoUri, VCard},
 };
 
 mod state;
@@ -49,7 +49,8 @@ pub enum Write {
 /// before use; `changed`, `removed` and `list_etags` come back in href order
 /// (a real server's order is arbitrary — do not depend on it); it accepts any
 /// href, including ones outside its collection; and it stores bodies verbatim
-/// and never rewrites them (to simulate a server rewrite, follow a `put` with
+/// and never rewrites them unless `drop_photos_on_put` or `icloud_photos` is
+/// on (to simulate another server rewrite, follow a `put` with
 /// `external_put`). Tests should use synthetic cards, since `Write` and
 /// `card()` expose full bodies.
 pub struct InMemoryAddressBook {
@@ -68,6 +69,11 @@ struct State {
     writes: Vec<Write>,
     omit_etag_on_put: bool,
     drop_photos_on_put: bool,
+    /// iCloud mode (`icloud_photos`): the fetcher serving uploaded photos and
+    /// the card size limit.
+    icloud_photos: Option<(Arc<InMemoryPhotoFetcher>, usize)>,
+    /// Numbers the URIs minted in iCloud mode; bumped on every upload.
+    photo_seq: u64,
     failures: VecDeque<(Op, AddressBookError)>,
 }
 
@@ -84,6 +90,8 @@ impl InMemoryAddressBook {
                 writes: Vec::new(),
                 omit_etag_on_put: false,
                 drop_photos_on_put: false,
+                icloud_photos: None,
+                photo_seq: 0,
                 failures: VecDeque::new(),
             }),
         }
@@ -127,6 +135,16 @@ impl InMemoryAddressBook {
     /// like a server that silently drops a photo it would not keep.
     pub fn drop_photos_on_put(&self, drop: bool) {
         self.state().drop_photos_on_put = drop;
+    }
+
+    /// Makes `put` behave like iCloud (CG-15 S3, S5, S7): a body over
+    /// `max_card_bytes` is rejected with `AddressBookError::TooLarge` (the
+    /// attempt is still recorded), and an inline `PHOTO` is stored as
+    /// `PHOTO;VALUE=uri:https://gateway.icloud.com/fake/<n>`, with a fresh
+    /// `n` on every upload, its bytes served by `fetcher`. The returned ETag
+    /// is the stored (rewritten) card's.
+    pub fn icloud_photos(&self, fetcher: Arc<InMemoryPhotoFetcher>, max_card_bytes: usize) {
+        self.state().icloud_photos = Some((fetcher, max_card_bytes));
     }
 
     /// Fails the next call of `op` with `error`. Queued failures are consumed
@@ -283,9 +301,25 @@ impl AddressBook for InMemoryAddressBook {
             return Err(AddressBookError::PreconditionFailed { href: href.clone() }.into());
         }
 
-        let stored = match VCard::parse(body) {
+        let mut body = body.to_vec();
+        if let Some((fetcher, max)) = state.icloud_photos.clone() {
+            if body.len() > max {
+                return Err(AddressBookError::TooLarge { href: href.clone() }.into());
+            }
+            if let Ok(card) = VCard::parse(body.clone())
+                && let Some(CardPhoto::Inline(data)) = card.photo()
+            {
+                state.photo_seq += 1;
+                let uri = fetcher.serve(&format!("https://gateway.icloud.com/fake/{}", state.photo_seq), data.bytes.to_vec());
+                let text = String::from_utf8(card.without_photos().into_bytes()).expect("utf-8 card");
+                body = text
+                    .replacen("END:VCARD", &format!("PHOTO;VALUE=uri:{}\r\nEND:VCARD", uri.as_str()), 1)
+                    .into_bytes();
+            }
+        }
+        let stored = match VCard::parse(body.clone()) {
             Ok(card) if state.drop_photos_on_put => card.without_photos().as_bytes().to_vec(),
-            _ => body.to_vec(),
+            _ => body,
         };
         let etag = state.store(href.clone(), stored);
         Ok((!state.omit_etag_on_put).then_some(etag))
@@ -606,6 +640,47 @@ mod tests {
 
         book.put(&href("/a.vcf"), b"card-a", Precondition::IfNoneMatch).await.unwrap();
         assert_eq!(book.writes().len(), 2, "both attempts are recorded, including the failed one");
+    }
+
+    #[tokio::test]
+    async fn icloud_photos_mode_rewrites_inline_photos_to_a_fresh_uri_per_upload() {
+        let book = InMemoryAddressBook::default();
+        let fetcher = Arc::new(InMemoryPhotoFetcher::new());
+        book.icloud_photos(fetcher.clone(), 10_000);
+        let card = VCard::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u1\r\nFN:Jane\r\nEND:VCARD\r\n")
+            .unwrap()
+            .with_inline_photo(&[0xFF, 0xD8, 0xFF, 1, 2, 3]);
+
+        let first_etag = book.put(&href("/a.vcf"), card.as_bytes(), Precondition::IfNoneMatch).await.unwrap();
+        let (stored_etag, stored) = book.card(&href("/a.vcf")).unwrap();
+        assert_eq!(first_etag, Some(stored_etag.clone()), "the PUT returns the rewritten card's ETag (S3)");
+        let Some(CardPhoto::Uri(first)) = VCard::parse(stored).unwrap().photo() else {
+            panic!("expected a URI photo");
+        };
+        assert_eq!(
+            fetcher.fetch(&first).await.unwrap(),
+            [0xFF, 0xD8, 0xFF, 1, 2, 3],
+            "same bytes behind the URI (S4)"
+        );
+
+        book.put(&href("/a.vcf"), card.as_bytes(), Precondition::IfMatch(stored_etag)).await.unwrap();
+        let Some(CardPhoto::Uri(second)) = VCard::parse(book.card(&href("/a.vcf")).unwrap().1).unwrap().photo() else {
+            panic!("expected a URI photo");
+        };
+        assert_ne!(first, second, "every upload mints a new URI (S5)");
+        assert_eq!(fetcher.fetch(&second).await.unwrap(), [0xFF, 0xD8, 0xFF, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn icloud_photos_mode_rejects_an_oversized_card_after_recording_it() {
+        let book = InMemoryAddressBook::default();
+        book.icloud_photos(Arc::new(InMemoryPhotoFetcher::new()), 10);
+
+        let err = book.put(&href("/a.vcf"), b"more than ten bytes", Precondition::IfNoneMatch).await.unwrap_err();
+
+        assert!(matches!(err, Error::AddressBook(AddressBookError::TooLarge { .. })), "{err:?}");
+        assert_eq!(book.writes().len(), 1);
+        assert_eq!(book.card(&href("/a.vcf")), None);
     }
 
     #[tokio::test]
