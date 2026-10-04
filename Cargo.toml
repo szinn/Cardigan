@@ -23,20 +23,15 @@ thiserror = "2.0.21"
 # Database
 sea-orm = { version = "2.0.3", features = [
     "debug-print",
-    "postgres-array",
     "runtime-tokio-rustls",
-    "sqlx-postgres",
     "sqlx-sqlite",
-    "sqlx-mysql",
     "with-chrono",
     "with-json",
     "with-rust_decimal",
     "with-uuid",
 ] }
 sea-orm-migration = { version = "2.0.3", features = [
-    "sqlx-postgres",
     "sqlx-sqlite",
-    "sqlx-mysql",
     "runtime-tokio-rustls",
     "with-chrono",
     "with-json",
@@ -46,7 +41,10 @@ sea-orm-migration = { version = "2.0.3", features = [
 sqlx = "0.9.0"
 
 # Images
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
 
 # CardDAV
 httpdate = "1.0.3"
