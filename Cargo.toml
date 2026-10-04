@@ -90,7 +90,7 @@ tracing-subscriber = { version = "0.3.23", features = [
 ] }
 
 # Testing
-insta = { version = "1.48.0", features = ["filters"] }
+insta = { version = "1.49.0", features = ["filters"] }
 tempfile = "3.27.0"
 testcontainers = "0.27.3"
 wiremock = "0.6.5"
