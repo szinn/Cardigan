@@ -5,18 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2](https://github.com/szinn/Cardigan/compare/v0.1.1..v0.1.2) - 2026-10-04
+## [0.1.3](https://github.com/szinn/Cardigan/compare/v0.1.1..v0.1.3) - 2026-10-04
 
 ### Features
 
+- _(cg-core)_ Execute photo writes and record photo state - ([80952a1](https://github.com/szinn/Cardigan/commit/80952a135c4cd8532c916f60c968f614603d15cc))
+- _(cg-core)_ Plan photo changes per side - ([19b0783](https://github.com/szinn/Cardigan/commit/19b078352faf18a29629bdd21bf27980f4d854c9))
+- _(cg-core)_ Download iCloud photos before planning - ([f60d2ed](https://github.com/szinn/Cardigan/commit/f60d2ed4be59f15261bd1df08c859d04cb18dadc))
+- _(cg-core)_ Add the PhotoFetcher port and iCloud adapter - ([a83dcb8](https://github.com/szinn/Cardigan/commit/a83dcb812134492e507726097944b18e04cef3b7))
+- _(cg-core)_ Fit photos into iCloud's card size limit - ([46ef0d3](https://github.com/szinn/Cardigan/commit/46ef0d3563af2aaf6c616426b1e6aafaa944634b))
+- _(cg-core)_ Add photo identities and inline-photo rewriting - ([3426afa](https://github.com/szinn/Cardigan/commit/3426afa1d11d00bd451952ce813a1340a5ff04ba))
 - _(cg-core)_ Relink groups after a replayed recreate; report unmapped members - ([0e0c376](https://github.com/szinn/Cardigan/commit/0e0c3762c4f318a1248d4b559bc53d4586a9b341))
 - _(cg-core)_ Relink copied groups after a re-UID - ([e702603](https://github.com/szinn/Cardigan/commit/e702603b2d89daca827342f54346762565d2cfc3))
 - _(cg-core)_ Add Op::CopyGroup - ([7db2a68](https://github.com/szinn/Cardigan/commit/7db2a68a7833f7a38e99966f0294f41f6a825197))
 - _(cg-core)_ Rewrite group member UIDs in a vCard - ([33c278e](https://github.com/szinn/Cardigan/commit/33c278eb91e7594b0b3d075e1fd89cab33776864))
+- _(cg-database)_ Record per-side photo state - ([ecfdb39](https://github.com/szinn/Cardigan/commit/ecfdb39754457da5936032f3ef87bafb002fd725))
+
+### Bug Fixes
+
+- _(cg-core)_ CG-15 final-review follow-ups - ([76dc80e](https://github.com/szinn/Cardigan/commit/76dc80edb80b76151a200b0710e8606f51e37ecb))
 
 ### Testing
 
+- _(cg-core)_ End-to-end photo sync against an iCloud-mode fake - ([18f5e0f](https://github.com/szinn/Cardigan/commit/18f5e0f612e1f50939f77fbbb7734d0ee6bba4d0))
 - _(cg-core)_ Cover unmapped-member reporting and relink edge cases - ([dad20df](https://github.com/szinn/Cardigan/commit/dad20df8bd4ca4dffb8aa27013f7ee05eb5cbeb7))
+- _(integration-tests)_ Update stale expectations after CG-15 and CG-18 - ([603f1b8](https://github.com/szinn/Cardigan/commit/603f1b825740f5d9b8141b395f523542aab006b1))
+
+### Miscellaneous Tasks
+
+- _(cargo)_ Remove postgres and mysql support - ([2bc7123](https://github.com/szinn/Cardigan/commit/2bc71233e51c34515af1a5a32dcfbe8c72abaec2))
 
 ## [0.1.1](https://github.com/szinn/Cardigan/compare/v0.1.0..v0.1.1) - 2026-09-29
 
