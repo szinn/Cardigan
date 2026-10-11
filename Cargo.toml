@@ -97,7 +97,7 @@ wiremock = "0.6.5"
 
 # Serialization
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 
 # Test support
 mockall = "0.15.0"
