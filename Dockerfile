@@ -48,7 +48,7 @@ RUN ls -lR target/x86_64-unknown-linux-musl
 # Sanity check: should say "not a dynamic executable"
 RUN ldd target/x86_64-unknown-linux-musl/release/cardigan || true
 
-FROM ubuntu:latest@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c AS certs
+FROM ubuntu:latest@sha256:065aa8626841f16057b78b027b464cd59c4fac36c204c72dcbf48d66f5fa8a96 AS certs
 RUN groupadd --gid 1234 cardigan && useradd -g 1234 -M -u 1234 -s /usr/sbin/nologin cardigan
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN update-ca-certificates
