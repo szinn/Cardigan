@@ -16,17 +16,19 @@ Use only `jj` commands for all version control operations.
 
 ## Workflows
 
-**Multi-step implementations:** Each logical step **MUST** be its own jj changeset. Before
+**Multi-step implementations:** Make each logical step its own jj changeset. Before
 starting a step, ensure the working copy is empty (`jj new` if needed). At the end of each
 step, run the end-of-task routine below.
 
 **After completing each task (end-of-task routine):**
 
-These **MUST** be run as separate Bash commands. Do **NOT** join them into a single one with `&&`.
+Run these as three separate Bash commands, not joined with `&&`.
 
 1. `mise run fmt-lint` — format code
 2. `mise run test` — verify tests pass
-3. `jj desc -m "type(scope): description\n\nbody"` — update working copy description
+3. `jj desc -m "…"` — update the working copy description: `type(scope): description`, a blank
+   line, then the body. Put real newlines inside the quotes; `\n` in double quotes reaches jj as a
+   literal backslash-n.
 
 **Integration:** When work is finished, leave the jj changes in place. Never merge, push, move
 bookmarks or open PRs; the user integrates. Skip any "how to integrate" menu and just report the
@@ -34,7 +36,7 @@ change ids and descriptions.
 
 ### Workspaces
 
-Use the `jj-workspace` skill and `jj` commands to manage workspaces. _DO NOT_ use `git` commands.
+Use the `jj-workspace` skill and `jj` commands to manage workspaces.
 
 When creating a new workspace, run
 
@@ -77,10 +79,8 @@ To verify the baseline state, run `mise run test`.
 This project uses `.insights/` for research, triage docs, specs, plans, and personal notes
 managed by the `insights` CLI.
 
-**At the start of brainstorming, spec writing, or planning work**, dispatch the
-`insights-locator` agent to check for prior context before proceeding. Use
-`insights-analyzer` to read the most relevant documents. Use the `insights-research`
-skill to orchestrate both and save a research document.
+At the start of brainstorming, spec writing, or planning work, check for prior context with the
+`issueboss:insights-research` skill (it runs `insights-locator` and `insights-analyzer`).
 
 Directory layout:
 
