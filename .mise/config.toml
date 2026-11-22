@@ -2,7 +2,7 @@
 
 [tools]
 "cargo:cargo-audit" = "0.23.0"
-"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-deny" = "0.22.0"
 "cargo:cargo-insta" = "1.49.0"
 "cargo:cargo-nextest" = "0.9.152"
 "cargo:sea-orm-cli" = "2.0.4"
