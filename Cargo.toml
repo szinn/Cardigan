@@ -54,7 +54,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 ] }
 roxmltree = "0.21.2"
 secrecy = "0.10.3"
-url = "2.5.8"
+url = "2.5.9"
 
 # CLI
 clap = { version = "4.6.7", features = ["cargo", "derive", "env"] }
