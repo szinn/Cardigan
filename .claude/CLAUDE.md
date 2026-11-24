@@ -24,7 +24,7 @@ step, run the end-of-task routine below.
 
 Run these as three separate Bash commands, not joined with `&&`.
 
-1. `mise run fmt-lint` — format code
+1. `mise run fmt-lint` — format and lint
 2. `mise run test` — verify tests pass
 3. `jj desc -m "…"` — update the working copy description: `type(scope): description`, a blank
    line, then the body. Put real newlines inside the quotes; `\n` in double quotes reaches jj as a
@@ -49,14 +49,17 @@ To verify the baseline state, run `mise run test`.
 
 ## Testing
 
-- Tests live alongside source code in `#[cfg(test)]` modules
+- Unit tests live alongside source code in `#[cfg(test)]` modules
+- Radicale integration tests live in `crates/integration-tests`; they are `#[ignore]`d, need
+  docker/colima, and run with `mise run integration-tests`, not `mise run test`
 
 ## Running against real servers
 
 - Credentials come from `config.sops.env` via `.envrc`; run the binary with
   `direnv exec . cargo run -- <command>` (e.g. `dump icloud`, `dry-run`).
-- The state database is `Data/cardigan.db` (`CARDIGAN_DATABASE_PATH`). Copy it before inspecting
-  with `sqlite3`; the live file may be locked.
+- The state database is `Data/cardigan.db`. `CARDIGAN_DATABASE_PATH` names its directory, which
+  must already exist. Copy the database before inspecting with `sqlite3`; the live file may be
+  locked.
 - No other client may edit both accounts. A device with both iCloud and Fastmail in Contacts
   merges cards by name, not by Cardigan's UID pairs, so one delete there can remove cards from
   two different pairs, and Cardigan then propagates both. When deletes look wrong, first ask
@@ -71,7 +74,8 @@ To verify the baseline state, run `mise run test`.
 
 ## Conventions
 
-- **Commits:** Valid scopes: match crate names
+- **Commits:** Use the crate name as scope for crate changes; otherwise use an area scope already
+  in the history, such as `deps`, `release`, `ci`, `ignore` or `claude`
 - **Error handling:** `thiserror` for all library crates; `anyhow` for binaries
 
 ## Insights
